@@ -17,7 +17,7 @@ COPY --from=build /app/dist ./dist
 COPY --from=build /app/scripts ./scripts
 COPY --from=build /app/docs ./docs
 COPY --from=build /app/examples ./examples
-COPY --from=build /app/.env.example ./.env.example
+// COPY --from=build /app/.env.example ./.env.example
 RUN npm ci --omit=dev
 
 EXPOSE 8000
