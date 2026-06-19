@@ -10,6 +10,7 @@
 
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { ToolAnnotations, Tool } from '@modelcontextprotocol/sdk/types.js';
+import { z, ZodTypeAny, ZodRawShape } from 'zod';
 
 import { GHLApiClient } from './clients/ghl-api-client.js';
 import { ContactTools } from './tools/contact-tools.js';
@@ -217,6 +218,69 @@ function isPrivateOrInternalPath(path: string, category: string, toolName: strin
   return /oauth|login|firebase|integrations|internal|marketplace|social-media-posting|saas|snapshots|phone|voice-ai|proposals|custom-menus|workflowbuilder/i.test(value);
 }
 
+// ─── JSON Schema → Zod shape ─────────────────────────────────
+// The SDK's registerTool() needs a ZodRawShape as `inputSchema` to (a) advertise
+// the schema in tools/list and (b) parse + forward the call arguments to the
+// handler. Our tool modules store plain JSON Schema, so convert it here.
+// Anything we don't explicitly understand falls back to z.any() so we never
+// reject valid arguments or crash registration.
+
+function jsonSchemaPropToZod(prop: any): ZodTypeAny {
+  if (!prop || typeof prop !== 'object') return z.any();
+
+  let base: ZodTypeAny;
+
+  if (Array.isArray(prop.enum) && prop.enum.length > 0) {
+    const values = prop.enum.filter((v: any) => typeof v === 'string');
+    base = values.length === prop.enum.length
+      ? z.enum(values as [string, ...string[]])
+      : z.any();
+  } else {
+    switch (prop.type) {
+      case 'string':
+        base = z.string();
+        break;
+      case 'number':
+      case 'integer':
+        base = z.number();
+        break;
+      case 'boolean':
+        base = z.boolean();
+        break;
+      case 'array':
+        base = z.array(prop.items ? jsonSchemaPropToZod(prop.items) : z.any());
+        break;
+      case 'object':
+        base = prop.properties
+          ? z.object(jsonSchemaToZodShape(prop)).partial()
+          : z.record(z.string(), z.any());
+        break;
+      default:
+        base = z.any();
+    }
+  }
+
+  if (typeof prop.description === 'string') {
+    base = base.describe(prop.description);
+  }
+  return base;
+}
+
+function jsonSchemaToZodShape(schema: any): ZodRawShape {
+  const shape: ZodRawShape = {};
+  if (!schema || typeof schema !== 'object' || !schema.properties) return shape;
+
+  const required: string[] = Array.isArray(schema.required)
+    ? schema.required.map(String)
+    : [];
+
+  for (const [key, prop] of Object.entries(schema.properties)) {
+    const zodType = jsonSchemaPropToZod(prop);
+    shape[key] = required.includes(key) ? zodType : zodType.optional();
+  }
+  return shape;
+}
+
 // ─── Tool Registry ──────────────────────────────────────────
 
 export class ToolRegistry {
@@ -378,6 +442,7 @@ export class ToolRegistry {
 
       const meta = (tool as any)._meta;
       const annotations = inferAnnotations(tool.name, meta);
+      const inputSchema = jsonSchemaToZodShape((tool as any).inputSchema);
 
       try {
         server.registerTool(
@@ -385,6 +450,7 @@ export class ToolRegistry {
           {
             title: annotations.title,
             description: tool.description || '',
+            inputSchema,
             annotations,
             _meta: meta,
           },
