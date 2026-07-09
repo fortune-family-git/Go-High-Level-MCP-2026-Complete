@@ -343,6 +343,18 @@ const WORKSPACE_SPECS: WorkspaceToolSpec[] = [
     ],
   },
   {
+    name: 'crm_pipeline_stage_counts',
+    title: 'Pipeline Stage Counts',
+    description: 'Return the exact number of opportunities in every stage of a pipeline, plus the pipeline total. Uses meta.total per stage (not a sample), so counts are precise even for large pipelines. Pass pipelineId; optionally pass status (open|won|lost|abandoned) to count only that status.',
+    app: 'pipeline-board',
+    access: 'read',
+    inputProperties: {
+      pipelineId: { type: 'string', description: 'ID of the pipeline to count.' },
+      status: { type: 'string', description: 'Optional GHL opportunity status filter: open, won, lost, or abandoned. Omit to count all statuses.' },
+    },
+    required: ['pipelineId'],
+  },
+  {
     name: 'crm_prepare_opportunity_update',
     title: 'Prepare Opportunity Update',
     description: 'Prepare an opportunity create/update/status move with contact note and next task options.',
@@ -689,6 +701,7 @@ export class AgentWorkspaceTools {
     if (name === 'crm_list_workspaces') return this.listWorkspaces();
 
     const locationId = locationArg(args, this.ghlClient.getConfig().locationId);
+    if (name === 'crm_pipeline_stage_counts') return this.pipelineStageCounts(args, locationId);
     const proposedActions = compactActions(spec.buildActions?.(args, locationId) || actionsFromReadPlan(spec, args, locationId));
     const readResults = spec.readPlan ? await this.runReadPlan(spec, args, locationId) : [];
 
@@ -728,6 +741,55 @@ export class AgentWorkspaceTools {
         writePreparationTools: tools.filter((tool) => tool.access === 'write').map((tool) => tool.name),
       })),
       profileHint: 'Set GHL_TOOL_PROFILE=curated to expose only these workflow tools to agents. Use full for all tools, or raw for endpoint-level tools without the curated layer.',
+    };
+  }
+
+  private async pipelineStageCounts(args: JsonRecord, locationId: string): Promise<unknown> {
+    const pipelineId = stringArg(args.pipelineId);
+    if (!pipelineId) throw new Error('pipelineId is required for crm_pipeline_stage_counts.');
+    const status = stringArg(args.status);
+    const statusQs = status ? `&status=${enc(status)}` : '';
+
+    // 1. Load pipeline definitions to resolve the pipeline's stages.
+    const pipelinesResp = await this.ghlClient.makeRequest<any>('GET', `/opportunities/pipelines?locationId=${enc(locationId)}`);
+    if (!pipelinesResp.success) {
+      throw new Error(`Failed to load pipelines: ${pipelinesResp.error || 'unknown error'}`);
+    }
+    const rawPipelines = pipelinesResp.data?.pipelines ?? pipelinesResp.data;
+    const list: any[] = Array.isArray(rawPipelines) ? rawPipelines : (rawPipelines?.items || []);
+    const pipeline = list.find((p: any) => p?.id === pipelineId);
+    if (!pipeline) {
+      throw new Error(`Pipeline ${pipelineId} not found in location ${locationId}.`);
+    }
+    const stages: any[] = Array.isArray(pipeline.stages) ? [...pipeline.stages] : [];
+    stages.sort((a, b) => (a?.position ?? 0) - (b?.position ?? 0));
+
+    // 2. Count opportunities per stage via meta.total (limit=1 keeps each read tiny).
+    const countFor = async (stageQs: string): Promise<number | null> => {
+      const resp = await this.ghlClient.makeRequest<any>(
+        'GET',
+        `/opportunities/search?location_id=${enc(locationId)}&pipeline_id=${enc(pipelineId)}${stageQs}${statusQs}&limit=1`,
+      );
+      if (!resp.success) return null;
+      const total = resp.data?.meta?.total;
+      return typeof total === 'number' ? total : null;
+    };
+
+    const stageCounts = await Promise.all(stages.map(async (stage: any) => ({
+      position: stage?.position ?? null,
+      stage: stage?.name ?? null,
+      stageId: stage?.id ?? null,
+      total: await countFor(`&pipeline_stage_id=${enc(stage?.id)}`),
+    })));
+
+    const pipelineTotal = await countFor('');
+
+    return {
+      pipeline: { id: pipelineId, name: pipeline.name ?? null },
+      status: status || 'all',
+      stages: stageCounts,
+      total: pipelineTotal,
+      note: 'Counts are exact (meta.total per stage), not sampled.',
     };
   }
 
