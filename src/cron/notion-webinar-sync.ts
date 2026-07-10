@@ -88,6 +88,29 @@ async function notionPatchNumbers(pageId: string, values: Record<string, number>
   if (!res.ok) throw new Error(`Notion update failed (${res.status}): ${await res.text()}`);
 }
 
+/** Post an audit comment on the Notion page. Requires the integration to have "insert comment" capability. */
+async function notionAddComment(pageId: string, text: string): Promise<void> {
+  const res = await fetch('https://api.notion.com/v1/comments', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${NOTION_TOKEN}`,
+      'Notion-Version': NOTION_VERSION,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ parent: { page_id: pageId }, rich_text: [{ text: { content: text } }] }),
+  });
+  if (!res.ok) throw new Error(`Notion comment failed (${res.status}): ${await res.text()}`);
+}
+
+/** Current time formatted in Europe/Berlin, independent of the container's TZ. */
+function berlinTimestamp(): string {
+  return new Intl.DateTimeFormat('de-DE', {
+    timeZone: 'Europe/Berlin',
+    dateStyle: 'medium',
+    timeStyle: 'short',
+  }).format(new Date());
+}
+
 async function main(): Promise<void> {
   const start = new Date().toISOString();
   console.log(`[${start}] GHL->Notion sync start (DRY_RUN=${DRY_RUN})`);
@@ -127,13 +150,29 @@ async function main(): Promise<void> {
   console.log(`  Follow-Up gebucht = max(GHL FU ${fuStage}, Notion ${cur['Follow-Up gebucht']}) = ${values['Follow-Up gebucht']}  (never-decrease)`);
   console.log(`  Verkäufe          = GHL Kauf ${kauf} = ${values['Verkäufe']}  (overwrite)`);
 
+  const commentText =
+    `🔄 Railway-Sync ${berlinTimestamp()} — ` +
+    `Anmeldungen ${values['Anmeldungen']} · CC gebucht ${values['CC gebucht']} · ` +
+    `SC gebucht ${values['SC gebucht']} · Follow-Up gebucht ${values['Follow-Up gebucht']} · ` +
+    `Verkäufe ${values['Verkäufe']}`;
+
   // 4. Write (unless dry run).
   if (DRY_RUN) {
     console.log('DRY_RUN active -> nothing written to Notion.');
+    console.log('DRY_RUN would post comment:', commentText);
     return;
   }
   await notionPatchNumbers(PAGE_ID, values);
-  console.log(`[${new Date().toISOString()}] Notion page ${PAGE_ID} updated OK.`);
+  console.log(`[${new Date().toISOString()}] Notion page ${PAGE_ID} properties updated OK.`);
+
+  // 5. Audit comment. Non-fatal: the KPI write already succeeded, so a comment
+  //    failure (e.g. integration lacks comment capability) must not fail the run.
+  try {
+    await notionAddComment(PAGE_ID, commentText);
+    console.log('Audit comment posted.');
+  } catch (err) {
+    console.warn('Comment post failed (KPI write still succeeded):', err instanceof Error ? err.message : err);
+  }
 }
 
 main().catch((err: unknown) => {
