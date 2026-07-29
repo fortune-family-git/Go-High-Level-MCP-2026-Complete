@@ -34,7 +34,9 @@ const STAGE = {
   ccGebucht: '93d561cc-5eba-41a4-955d-6bd2ae6dd789',
   kgGebucht: 'a78c6af6-549c-42cd-8204-9748dd828a62',
   fuGebucht: 'cc868107-b48f-46df-bb7f-95eb6ae3998f',
-  kauf: 'e048ff58-0cc1-4deb-96c2-75783c9fee32',
+  // "Kauf" wurde in zwei Stages gesplittet -> Verkäufe = Summe beider.
+  kaufVoll: 'e048ff58-0cc1-4deb-96c2-75783c9fee32',
+  kaufRaten: 'f0c43ad3-0df4-4821-8e46-0b7f440346c9',
 };
 
 /** Exact opportunity count in a stage (or the whole pipeline if stageId is empty), via meta.total. */
@@ -121,15 +123,17 @@ async function main(): Promise<void> {
   }
 
   // 1. Pull exact GHL counts (parallel).
-  const [total, landingpage, ccStage, kgStage, fuStage, kauf] = await Promise.all([
+  const [total, landingpage, ccStage, kgStage, fuStage, kaufVoll, kaufRaten] = await Promise.all([
     ghlStageTotal(''),
     ghlStageTotal(STAGE.landingpage),
     ghlStageTotal(STAGE.ccGebucht),
     ghlStageTotal(STAGE.kgGebucht),
     ghlStageTotal(STAGE.fuGebucht),
-    ghlStageTotal(STAGE.kauf),
+    ghlStageTotal(STAGE.kaufVoll),
+    ghlStageTotal(STAGE.kaufRaten),
   ]);
-  console.log(`GHL counts: total=${total} landingpage=${landingpage} CC=${ccStage} KG=${kgStage} FU=${fuStage} Kauf=${kauf}`);
+  const kauf = kaufVoll + kaufRaten;
+  console.log(`GHL counts: total=${total} landingpage=${landingpage} CC=${ccStage} KG=${kgStage} FU=${fuStage} Kauf=${kauf} (Voll ${kaufVoll} + Raten ${kaufRaten})`);
 
   // 2. Read current Notion values (needed for the never-decrease max-rule).
   const cur = await notionGetNumbers(PAGE_ID, ['CC gebucht', 'SC gebucht', 'Follow-Up gebucht']);
