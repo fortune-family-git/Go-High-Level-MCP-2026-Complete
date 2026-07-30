@@ -1,12 +1,22 @@
 /**
  * Daily GHL -> Notion KPI sync for the "MA Webinar Juli 2026" record.
  *
- * Reads exact per-stage opportunity counts from the GHL pipeline
- * "MA LiveWebinar_072026" and writes seven KPI fields to the Notion page in the
- * "Promotions" database. Read-only against GHL; writes only these 7 Notion fields:
- *   Anmeldungen, CC gebucht, CC geführt, SC gebucht, SC geführt,
- *   Follow-Up gebucht, Verkäufe.  (Notion "SC" == GHL "KG".)
- * All seven use the never-decrease rule: written value = max(GHL, current Notion).
+ * Writes eight KPI number fields to the Notion page in the "Promotions" database:
+ *   Anmeldungen, Verkäufe            -> from the GHL PIPELINE "MA LiveWebinar_072026"
+ *   CC gebucht / CC geführt          -> from the GHL CALENDARS (Money Talk group)
+ *   SC gebucht / SC geführt          -> from the GHL CALENDARS (Money Alchemy KG group)
+ *   Follow-Up gebucht / geführt      -> from the GHL CALENDARS (Follow Up group)
+ * (Notion "SC" == GHL "KG".)
+ *
+ * Calendar KPIs are counted as DISTINCT CONTACTS (a reschedule = cancelled + rebooked
+ * counts once), slot time from LAUNCH_START onward, excluding the account owner
+ * (test bookings). "gebucht" = distinct contacts with any appointment; "geführt" =
+ * distinct contacts with at least one CONFIRMED appointment.
+ *
+ * The Notion "No-Show CC/SC/FU" fields are FORMULAS (1 - geführt/gebucht, as %) and are
+ * computed automatically by Notion - this job does not (and cannot) write them.
+ *
+ * All number fields use the never-decrease rule: written value = max(computed, current Notion).
  *
  * Run:      node dist/cron/notion-webinar-sync.js
  * Schedule: Railway cron "0 20 * * *" with service TZ=Europe/Berlin
@@ -15,12 +25,13 @@
  *   GHL_API_KEY, GHL_LOCATION_ID, NOTION_TOKEN
  * Optional env:
  *   GHL_BASE_URL      (default https://services.leadconnectorhq.com)
- *   GHL_API_VERSION   (default 2023-02-21)
+ *   GHL_API_VERSION   (default 2023-02-21, used for the opportunities API)
  *   DRY_RUN=1         (compute + log, but do NOT write to Notion)
  */
 
 const GHL_BASE = process.env.GHL_BASE_URL || 'https://services.leadconnectorhq.com';
 const GHL_VERSION = process.env.GHL_API_VERSION || '2023-02-21';
+const GHL_CAL_VERSION = '2021-04-15'; // calendars API expects this version
 const GHL_KEY = process.env.GHL_API_KEY || '';
 const LOCATION_ID = process.env.GHL_LOCATION_ID || '';
 const NOTION_TOKEN = process.env.NOTION_TOKEN || '';
@@ -30,22 +41,36 @@ const DRY_RUN = process.env.DRY_RUN === '1' || process.env.DRY_RUN === 'true';
 const PIPELINE_ID = '4jGCaouIb52BEEEba5id';
 const PAGE_ID = '384828f7-cb43-8116-bcdf-e752d808c869';
 
-// Stage IDs of pipeline MA LiveWebinar_072026 (hard-coded so a stage *rename* in
-// GHL never breaks the mapping; only a stage *deletion* would, which we surface).
+// Pipeline stages still used for Anmeldungen (registrations) and Verkäufe (sales).
 const STAGE = {
   landingpage: '402e2603-34ed-4f9e-b407-96847d86ae7c',
-  ccGebucht: '93d561cc-5eba-41a4-955d-6bd2ae6dd789',
-  // "KG gebucht aus CC": speist Notion "SC gebucht" UND (mit ccKeinKg) "CC geführt".
-  kgGebuchtAusCC: 'a78c6af6-549c-42cd-8204-9748dd828a62',
-  // "CC geführt / kein KG angeboten": zweiter Baustein von "CC geführt".
-  ccKeinKg: '7256f8fd-b4b3-4c2c-b3f1-ba51272908f9',
-  fuGebucht: 'cc868107-b48f-46df-bb7f-95eb6ae3998f',
-  // "KG geführt / kein Angebot": Baustein von "SC geführt" (= KG geführt).
-  kgKeinAngebot: '3a84e16c-9989-47d4-9d22-8f0619a7c8d6',
-  // "Kauf" wurde in zwei Stages gesplittet -> Verkäufe = Summe beider.
   kaufVoll: 'e048ff58-0cc1-4deb-96c2-75783c9fee32',
   kaufRaten: 'f0c43ad3-0df4-4821-8e46-0b7f440346c9',
 };
+
+// Booking calendars per call type (group "Kennenlern-Gespräche" / "Für mehr Klarheit" /
+// "Follow Up Gespräche"). Round-robin + the two setter calendars each.
+const CC_CALENDARS = [
+  'Bt5nEvAmncnQ5bo5Yga6', // Money Talk (Round Robin)
+  'Nz8MsaIXcA91BwmVe07Y', // Money Talk Feven
+  '2ESxCK6tSwBwfCPsZvys', // Money Talk Monika
+];
+const KG_CALENDARS = [
+  'Ln7kRNXs1oP7kB9q3pn0', // Money Alchemy – Deine Zeit ist JETZT 💫 (Round Robin)
+  'fqMEAJyPUY4l66pa0SPa', // Money Alchemy – Deine Zeit ist JETZT ⭐ (Feven)
+  '5avoEvTgWZAb4U0cl5tC', // Money Alchemy – Deine Zeit ist JETZT ⭐ (MB, Monika)
+];
+const FU_CALENDARS = [
+  'g3rHhuPkT1kgeWQZ1Uy1', // Follow Up Feven Winde
+  'gCobK98dVDnJI5g3mgHa', // Follow Up Monika Beye
+];
+
+// Contacts excluded from calendar counts (account owner / test bookings).
+const EXCLUDE_CONTACT_IDS = new Set<string>(['oJHByWHQvm7kYeT3o7d9']); // Annett Timinger
+
+// Count window (slot time). Launch of the July-2026 webinar; open-ended into the future.
+const LAUNCH_START_MS = Date.parse('2026-07-07T22:00:00Z'); // 08.07.2026 00:00 Europe/Berlin
+const WINDOW_END_MS = () => Date.now() + 200 * 24 * 60 * 60 * 1000; // +200 days, catches future slots
 
 /** Exact opportunity count in a stage (or the whole pipeline if stageId is empty), via meta.total. */
 async function ghlStageTotal(stageId: string): Promise<number> {
@@ -63,6 +88,51 @@ async function ghlStageTotal(stageId: string): Promise<number> {
     throw new Error(`GHL response missing numeric meta.total for stage ${stageId || 'ALL'}`);
   }
   return total;
+}
+
+interface CalEvent { id?: string; contactId?: string; appointmentStatus?: string; }
+
+/** All appointment events of one calendar within the count window. */
+async function ghlCalendarEvents(calendarId: string): Promise<CalEvent[]> {
+  const q = new URLSearchParams({
+    locationId: LOCATION_ID,
+    calendarId,
+    startTime: String(LAUNCH_START_MS),
+    endTime: String(WINDOW_END_MS()),
+  });
+  const res = await fetch(`${GHL_BASE}/calendars/events?${q.toString()}`, {
+    headers: { Authorization: `Bearer ${GHL_KEY}`, Version: GHL_CAL_VERSION, Accept: 'application/json' },
+  });
+  if (!res.ok) {
+    throw new Error(`GHL calendar events failed (${res.status}) for calendar ${calendarId}: ${await res.text()}`);
+  }
+  const body: any = await res.json();
+  return Array.isArray(body?.events) ? (body.events as CalEvent[]) : [];
+}
+
+/**
+ * Consolidate a call type across its calendars into distinct-contact counts.
+ * gebucht  = distinct contacts with >=1 appointment (any status).
+ * gefuehrt = distinct contacts with >=1 CONFIRMED appointment.
+ * Reschedules (cancelled + rebooked) collapse to one contact; owner/test contacts excluded.
+ */
+async function calendarCounts(calendarIds: string[]): Promise<{ gebucht: number; gefuehrt: number }> {
+  const events = (await Promise.all(calendarIds.map(ghlCalendarEvents))).flat();
+  const seenAppt = new Set<string>();
+  const confirmedByContact = new Map<string, boolean>();
+  for (const e of events) {
+    const cid = e.contactId;
+    if (!cid || EXCLUDE_CONTACT_IDS.has(cid)) continue;
+    if (e.id) {
+      if (seenAppt.has(e.id)) continue; // de-dupe identical appointment objects
+      seenAppt.add(e.id);
+    }
+    const wasConfirmed = confirmedByContact.get(cid) === true;
+    confirmedByContact.set(cid, wasConfirmed || e.appointmentStatus === 'confirmed');
+  }
+  let gefuehrt = 0;
+  for (const isConfirmed of confirmedByContact.values()) if (isConfirmed) gefuehrt++;
+  return { gebucht: confirmedByContact.size, gefuehrt };
 }
 
 /** Read the current numeric values of the given Notion number properties (for the max-rule). */
@@ -130,59 +200,61 @@ async function main(): Promise<void> {
     if (!value) throw new Error(`Missing required env var: ${name}`);
   }
 
-  // 1. Pull exact GHL counts (parallel).
-  const [total, landingpage, ccStage, kgAusCc, ccKeinKg, fuStage, kgKeinAngebot, kaufVoll, kaufRaten] =
-    await Promise.all([
-      ghlStageTotal(''),
-      ghlStageTotal(STAGE.landingpage),
-      ghlStageTotal(STAGE.ccGebucht),
-      ghlStageTotal(STAGE.kgGebuchtAusCC),
-      ghlStageTotal(STAGE.ccKeinKg),
-      ghlStageTotal(STAGE.fuGebucht),
-      ghlStageTotal(STAGE.kgKeinAngebot),
-      ghlStageTotal(STAGE.kaufVoll),
-      ghlStageTotal(STAGE.kaufRaten),
-    ]);
+  // 1. Pipeline counts for Anmeldungen + Verkäufe, and calendar counts for CC/KG/FU (parallel).
+  const [total, landingpage, kaufVoll, kaufRaten, cc, kg, fu] = await Promise.all([
+    ghlStageTotal(''),
+    ghlStageTotal(STAGE.landingpage),
+    ghlStageTotal(STAGE.kaufVoll),
+    ghlStageTotal(STAGE.kaufRaten),
+    calendarCounts(CC_CALENDARS),
+    calendarCounts(KG_CALENDARS),
+    calendarCounts(FU_CALENDARS),
+  ]);
   const kauf = kaufVoll + kaufRaten;
-  // "geführt"-Kennzahlen = Summe der jeweils nachgelagerten Stages.
-  const ccGefuehrt = kgAusCc + ccKeinKg;
-  const scGefuehrt = kgKeinAngebot + fuStage + kaufVoll + kaufRaten;
+  const anmeldungen = total - landingpage;
   console.log(
-    `GHL counts: total=${total} landingpage=${landingpage} CC=${ccStage} KGausCC=${kgAusCc} ` +
-    `CCkeinKG=${ccKeinKg} FU=${fuStage} KGkeinAngebot=${kgKeinAngebot} Kauf=${kauf} (Voll ${kaufVoll} + Raten ${kaufRaten})`
+    `Pipeline: total=${total} landingpage=${landingpage} -> Anmeldungen=${anmeldungen} | ` +
+    `Kauf=${kauf} (Voll ${kaufVoll} + Raten ${kaufRaten})`
+  );
+  console.log(
+    `Kalender (distinkte Kontakte): CC ${cc.gebucht}/${cc.gefuehrt} | ` +
+    `KG ${kg.gebucht}/${kg.gefuehrt} | FU ${fu.gebucht}/${fu.gefuehrt}  (gebucht/geführt)`
   );
 
-  // 2. Read current Notion values (needed for the never-decrease max-rule on ALL fields).
+  // 2. Read current Notion values (needed for the never-decrease max-rule on all number fields).
   const cur = await notionGetNumbers(PAGE_ID, [
-    'Anmeldungen', 'CC gebucht', 'SC gebucht', 'Follow-Up gebucht', 'Verkäufe', 'CC geführt', 'SC geführt',
+    'Anmeldungen', 'Verkäufe',
+    'CC gebucht', 'CC geführt', 'SC gebucht', 'SC geführt', 'Follow-Up gebucht', 'Follow-Up geführt',
   ]);
 
-  // 3. Compute the target values. Every field is never-decrease: max(GHL, aktueller Notion-Wert).
-  const anmeldungen = total - landingpage;
+  // 3. Compute the target values. Every field is never-decrease: max(computed, current Notion).
   const values: Record<string, number> = {
     Anmeldungen: Math.max(anmeldungen, cur['Anmeldungen']),
-    'CC gebucht': Math.max(ccStage, cur['CC gebucht']),
-    'SC gebucht': Math.max(kgAusCc, cur['SC gebucht']),
-    'Follow-Up gebucht': Math.max(fuStage, cur['Follow-Up gebucht']),
     'Verkäufe': Math.max(kauf, cur['Verkäufe']),
-    'CC geführt': Math.max(ccGefuehrt, cur['CC geführt']),
-    'SC geführt': Math.max(scGefuehrt, cur['SC geführt']),
+    'CC gebucht': Math.max(cc.gebucht, cur['CC gebucht']),
+    'CC geführt': Math.max(cc.gefuehrt, cur['CC geführt']),
+    'SC gebucht': Math.max(kg.gebucht, cur['SC gebucht']),
+    'SC geführt': Math.max(kg.gefuehrt, cur['SC geführt']),
+    'Follow-Up gebucht': Math.max(fu.gebucht, cur['Follow-Up gebucht']),
+    'Follow-Up geführt': Math.max(fu.gefuehrt, cur['Follow-Up geführt']),
   };
 
   console.log('Field mapping (all never-decrease):');
-  console.log(`  Anmeldungen       = max(GHL ${anmeldungen} [${total}-${landingpage}], Notion ${cur['Anmeldungen']}) = ${values['Anmeldungen']}`);
-  console.log(`  CC gebucht        = max(GHL ${ccStage}, Notion ${cur['CC gebucht']}) = ${values['CC gebucht']}`);
-  console.log(`  SC gebucht        = max(GHL KGausCC ${kgAusCc}, Notion ${cur['SC gebucht']}) = ${values['SC gebucht']}`);
-  console.log(`  Follow-Up gebucht = max(GHL FU ${fuStage}, Notion ${cur['Follow-Up gebucht']}) = ${values['Follow-Up gebucht']}`);
-  console.log(`  Verkäufe          = max(GHL Kauf ${kauf}, Notion ${cur['Verkäufe']}) = ${values['Verkäufe']}`);
-  console.log(`  CC geführt        = max(GHL ${ccGefuehrt} [KGausCC ${kgAusCc}+CCkeinKG ${ccKeinKg}], Notion ${cur['CC geführt']}) = ${values['CC geführt']}`);
-  console.log(`  SC geführt        = max(GHL ${scGefuehrt} [KGkeinAngebot ${kgKeinAngebot}+FU ${fuStage}+Voll ${kaufVoll}+Raten ${kaufRaten}], Notion ${cur['SC geführt']}) = ${values['SC geführt']}`);
+  console.log(`  Anmeldungen       = max(${anmeldungen}, Notion ${cur['Anmeldungen']}) = ${values['Anmeldungen']}`);
+  console.log(`  Verkäufe          = max(Kauf ${kauf}, Notion ${cur['Verkäufe']}) = ${values['Verkäufe']}`);
+  console.log(`  CC gebucht        = max(Kal ${cc.gebucht}, Notion ${cur['CC gebucht']}) = ${values['CC gebucht']}`);
+  console.log(`  CC geführt        = max(Kal ${cc.gefuehrt}, Notion ${cur['CC geführt']}) = ${values['CC geführt']}`);
+  console.log(`  SC gebucht        = max(Kal ${kg.gebucht}, Notion ${cur['SC gebucht']}) = ${values['SC gebucht']}`);
+  console.log(`  SC geführt        = max(Kal ${kg.gefuehrt}, Notion ${cur['SC geführt']}) = ${values['SC geführt']}`);
+  console.log(`  Follow-Up gebucht = max(Kal ${fu.gebucht}, Notion ${cur['Follow-Up gebucht']}) = ${values['Follow-Up gebucht']}`);
+  console.log(`  Follow-Up geführt = max(Kal ${fu.gefuehrt}, Notion ${cur['Follow-Up geführt']}) = ${values['Follow-Up geführt']}`);
+  console.log('  (No-Show CC/SC/FU sind Notion-Formeln = 1 - geführt/gebucht, werden automatisch berechnet.)');
 
   const commentText =
     `🔄 Railway-Sync ${berlinTimestamp()} — ` +
-    `Anmeldungen ${values['Anmeldungen']} · CC gebucht ${values['CC gebucht']} · CC geführt ${values['CC geführt']} · ` +
-    `SC gebucht ${values['SC gebucht']} · SC geführt ${values['SC geführt']} · ` +
-    `Follow-Up gebucht ${values['Follow-Up gebucht']} · Verkäufe ${values['Verkäufe']}`;
+    `Anmeldungen ${values['Anmeldungen']} · Verkäufe ${values['Verkäufe']} · ` +
+    `CC ${values['CC gebucht']}/${values['CC geführt']} · SC ${values['SC gebucht']}/${values['SC geführt']} · ` +
+    `FU ${values['Follow-Up gebucht']}/${values['Follow-Up geführt']} (gebucht/geführt)`;
 
   // 4. Write (unless dry run).
   if (DRY_RUN) {
