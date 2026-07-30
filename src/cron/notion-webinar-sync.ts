@@ -2,8 +2,11 @@
  * Daily GHL -> Notion KPI sync for the "MA Webinar Juli 2026" record.
  *
  * Reads exact per-stage opportunity counts from the GHL pipeline
- * "MA LiveWebinar_072026" and writes five KPI fields to the Notion page in the
- * "Promotions" database. Read-only against GHL; writes only 5 Notion fields.
+ * "MA LiveWebinar_072026" and writes seven KPI fields to the Notion page in the
+ * "Promotions" database. Read-only against GHL; writes only these 7 Notion fields:
+ *   Anmeldungen, CC gebucht, CC geführt, SC gebucht, SC geführt,
+ *   Follow-Up gebucht, Verkäufe.  (Notion "SC" == GHL "KG".)
+ * All seven use the never-decrease rule: written value = max(GHL, current Notion).
  *
  * Run:      node dist/cron/notion-webinar-sync.js
  * Schedule: Railway cron "0 20 * * *" with service TZ=Europe/Berlin
@@ -32,8 +35,13 @@ const PAGE_ID = '384828f7-cb43-8116-bcdf-e752d808c869';
 const STAGE = {
   landingpage: '402e2603-34ed-4f9e-b407-96847d86ae7c',
   ccGebucht: '93d561cc-5eba-41a4-955d-6bd2ae6dd789',
-  kgGebucht: 'a78c6af6-549c-42cd-8204-9748dd828a62',
+  // "KG gebucht aus CC": speist Notion "SC gebucht" UND (mit ccKeinKg) "CC geführt".
+  kgGebuchtAusCC: 'a78c6af6-549c-42cd-8204-9748dd828a62',
+  // "CC geführt / kein KG angeboten": zweiter Baustein von "CC geführt".
+  ccKeinKg: '7256f8fd-b4b3-4c2c-b3f1-ba51272908f9',
   fuGebucht: 'cc868107-b48f-46df-bb7f-95eb6ae3998f',
+  // "KG geführt / kein Angebot": Baustein von "SC geführt" (= KG geführt).
+  kgKeinAngebot: '3a84e16c-9989-47d4-9d22-8f0619a7c8d6',
   // "Kauf" wurde in zwei Stages gesplittet -> Verkäufe = Summe beider.
   kaufVoll: 'e048ff58-0cc1-4deb-96c2-75783c9fee32',
   kaufRaten: 'f0c43ad3-0df4-4821-8e46-0b7f440346c9',
@@ -123,42 +131,58 @@ async function main(): Promise<void> {
   }
 
   // 1. Pull exact GHL counts (parallel).
-  const [total, landingpage, ccStage, kgStage, fuStage, kaufVoll, kaufRaten] = await Promise.all([
-    ghlStageTotal(''),
-    ghlStageTotal(STAGE.landingpage),
-    ghlStageTotal(STAGE.ccGebucht),
-    ghlStageTotal(STAGE.kgGebucht),
-    ghlStageTotal(STAGE.fuGebucht),
-    ghlStageTotal(STAGE.kaufVoll),
-    ghlStageTotal(STAGE.kaufRaten),
-  ]);
+  const [total, landingpage, ccStage, kgAusCc, ccKeinKg, fuStage, kgKeinAngebot, kaufVoll, kaufRaten] =
+    await Promise.all([
+      ghlStageTotal(''),
+      ghlStageTotal(STAGE.landingpage),
+      ghlStageTotal(STAGE.ccGebucht),
+      ghlStageTotal(STAGE.kgGebuchtAusCC),
+      ghlStageTotal(STAGE.ccKeinKg),
+      ghlStageTotal(STAGE.fuGebucht),
+      ghlStageTotal(STAGE.kgKeinAngebot),
+      ghlStageTotal(STAGE.kaufVoll),
+      ghlStageTotal(STAGE.kaufRaten),
+    ]);
   const kauf = kaufVoll + kaufRaten;
-  console.log(`GHL counts: total=${total} landingpage=${landingpage} CC=${ccStage} KG=${kgStage} FU=${fuStage} Kauf=${kauf} (Voll ${kaufVoll} + Raten ${kaufRaten})`);
+  // "geführt"-Kennzahlen = Summe der jeweils nachgelagerten Stages.
+  const ccGefuehrt = kgAusCc + ccKeinKg;
+  const scGefuehrt = kgKeinAngebot + fuStage + kaufVoll + kaufRaten;
+  console.log(
+    `GHL counts: total=${total} landingpage=${landingpage} CC=${ccStage} KGausCC=${kgAusCc} ` +
+    `CCkeinKG=${ccKeinKg} FU=${fuStage} KGkeinAngebot=${kgKeinAngebot} Kauf=${kauf} (Voll ${kaufVoll} + Raten ${kaufRaten})`
+  );
 
-  // 2. Read current Notion values (needed for the never-decrease max-rule).
-  const cur = await notionGetNumbers(PAGE_ID, ['CC gebucht', 'SC gebucht', 'Follow-Up gebucht']);
+  // 2. Read current Notion values (needed for the never-decrease max-rule on ALL fields).
+  const cur = await notionGetNumbers(PAGE_ID, [
+    'Anmeldungen', 'CC gebucht', 'SC gebucht', 'Follow-Up gebucht', 'Verkäufe', 'CC geführt', 'SC geführt',
+  ]);
 
-  // 3. Compute the five target values.
+  // 3. Compute the target values. Every field is never-decrease: max(GHL, aktueller Notion-Wert).
+  const anmeldungen = total - landingpage;
   const values: Record<string, number> = {
-    Anmeldungen: total - landingpage,
+    Anmeldungen: Math.max(anmeldungen, cur['Anmeldungen']),
     'CC gebucht': Math.max(ccStage, cur['CC gebucht']),
-    'SC gebucht': Math.max(kgStage, cur['SC gebucht']),
+    'SC gebucht': Math.max(kgAusCc, cur['SC gebucht']),
     'Follow-Up gebucht': Math.max(fuStage, cur['Follow-Up gebucht']),
-    'Verkäufe': kauf,
+    'Verkäufe': Math.max(kauf, cur['Verkäufe']),
+    'CC geführt': Math.max(ccGefuehrt, cur['CC geführt']),
+    'SC geführt': Math.max(scGefuehrt, cur['SC geführt']),
   };
 
-  console.log('Field mapping:');
-  console.log(`  Anmeldungen       = ${total} - ${landingpage} = ${values['Anmeldungen']}  (overwrite)`);
-  console.log(`  CC gebucht        = max(GHL ${ccStage}, Notion ${cur['CC gebucht']}) = ${values['CC gebucht']}  (never-decrease)`);
-  console.log(`  SC gebucht        = max(GHL KG ${kgStage}, Notion ${cur['SC gebucht']}) = ${values['SC gebucht']}  (never-decrease)`);
-  console.log(`  Follow-Up gebucht = max(GHL FU ${fuStage}, Notion ${cur['Follow-Up gebucht']}) = ${values['Follow-Up gebucht']}  (never-decrease)`);
-  console.log(`  Verkäufe          = GHL Kauf ${kauf} = ${values['Verkäufe']}  (overwrite)`);
+  console.log('Field mapping (all never-decrease):');
+  console.log(`  Anmeldungen       = max(GHL ${anmeldungen} [${total}-${landingpage}], Notion ${cur['Anmeldungen']}) = ${values['Anmeldungen']}`);
+  console.log(`  CC gebucht        = max(GHL ${ccStage}, Notion ${cur['CC gebucht']}) = ${values['CC gebucht']}`);
+  console.log(`  SC gebucht        = max(GHL KGausCC ${kgAusCc}, Notion ${cur['SC gebucht']}) = ${values['SC gebucht']}`);
+  console.log(`  Follow-Up gebucht = max(GHL FU ${fuStage}, Notion ${cur['Follow-Up gebucht']}) = ${values['Follow-Up gebucht']}`);
+  console.log(`  Verkäufe          = max(GHL Kauf ${kauf}, Notion ${cur['Verkäufe']}) = ${values['Verkäufe']}`);
+  console.log(`  CC geführt        = max(GHL ${ccGefuehrt} [KGausCC ${kgAusCc}+CCkeinKG ${ccKeinKg}], Notion ${cur['CC geführt']}) = ${values['CC geführt']}`);
+  console.log(`  SC geführt        = max(GHL ${scGefuehrt} [KGkeinAngebot ${kgKeinAngebot}+FU ${fuStage}+Voll ${kaufVoll}+Raten ${kaufRaten}], Notion ${cur['SC geführt']}) = ${values['SC geführt']}`);
 
   const commentText =
     `🔄 Railway-Sync ${berlinTimestamp()} — ` +
-    `Anmeldungen ${values['Anmeldungen']} · CC gebucht ${values['CC gebucht']} · ` +
-    `SC gebucht ${values['SC gebucht']} · Follow-Up gebucht ${values['Follow-Up gebucht']} · ` +
-    `Verkäufe ${values['Verkäufe']}`;
+    `Anmeldungen ${values['Anmeldungen']} · CC gebucht ${values['CC gebucht']} · CC geführt ${values['CC geführt']} · ` +
+    `SC gebucht ${values['SC gebucht']} · SC geführt ${values['SC geführt']} · ` +
+    `Follow-Up gebucht ${values['Follow-Up gebucht']} · Verkäufe ${values['Verkäufe']}`;
 
   // 4. Write (unless dry run).
   if (DRY_RUN) {
