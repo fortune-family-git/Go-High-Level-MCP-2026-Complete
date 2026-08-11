@@ -10,14 +10,19 @@
  *   Follow-Up gebucht / geführt      -> GHL CALENDARS, restricted to pipeline contacts
  * (Notion "SC" == GHL "KG".)
  *
- * WHY the extra restriction (decided 2026-08-07): the ExpertenBusiness booking calendars
- * are NOT launch-specific — "Klarheitsgespräch - ExpertenBusiness" has been taking
- * bookings continuously since June (evergreen funnel), and the Follow-Up calendars are
- * shared with the Money Alchemy funnel. A pure time window (what the MA job does, and
- * what works there) would therefore attribute foreign bookings to this launch: on
- * 2026-08-07 the KG calendar had 5 August slots, of which only 2 belonged to contacts in
+ * WHY the extra restriction (decided 2026-08-07): the pre-cutover ExpertenBusiness
+ * calendar is NOT launch-specific — "Klarheitsgespräch - ExpertenBusiness" has been taking
+ * bookings continuously since June (evergreen funnel). A pure time window (what the MA job
+ * does, and what works there) therefore attributes foreign bookings to this launch: on
+ * 2026-08-07 that calendar had 5 August slots, of which only 2 belonged to contacts in
  * this pipeline. Since Notion computes "No-Show SC" as 1 - geführt/gebucht, an inflated
  * "gebucht" produces a plausible-looking but wrong quota — the worst failure mode.
+ *
+ * The EB-prefixed calendars added later that day ARE launch-specific, which makes the
+ * filter redundant for them — but it stays, for two reasons: the pre-cutover calendar is
+ * still in the KG list, and the filter turns a mis-wired booking workflow into a visible
+ * number ("nicht zugerechnet") instead of a wrong KPI. If that counter climbs while the
+ * board shows bookings, the opportunity automation behind the new calendars is broken.
  *
  * So a booking counts only if the contact has an opportunity in THIS pipeline. Pipeline
  * membership (unlike stage membership) does not drain as the contact progresses, so this
@@ -72,29 +77,39 @@ const STAGES = {
 // Deliberately NOT counted as sales: "Zusage / Geldbeschaffung" (360edae7…, intent only),
 // "Fehlkauf" (65781889…), "Absage" (ce66b09d…), "NO Fit" (2b6918c3…).
 
-// Booking calendars per call type. Over-inclusion is comparatively safe here because
-// events are additionally filtered to this pipeline's contacts — but keep the lists
-// funnel-specific anyway: a contact may have older bookings from a different funnel
-// (verified: one lead had June "Magnetic Talk" slots), which LAUNCH_START excludes.
+// Booking calendars per call type. Since 2026-08-07 this launch has its own EB-prefixed
+// calendars (created mid-launch, all empty at cutover), so the lists below are the
+// authoritative mapping rather than an analogy to the MA funnel.
+//
+// EVERY LIST MUST HOLD ALL CALENDARS OF ITS CALL TYPE — including the pre-cutover one.
+// Counting is de-duplicated per CONTACT across the whole list, so a lead who rebooks from
+// the old calendar to a new one, or switches from Kate to Bianca, counts once. Summing
+// per-calendar counts instead would double-count exactly those cases. Conversely, dropping
+// the old calendar from a list would silently lose the bookings already counted there —
+// and the never-decrease rule would freeze the stale number in Notion instead of exposing
+// the drop.
 const CC_CALENDARS = [
-  'q4qmXBET2dlVP1uKgndQ', // Dein Start in dein ExpertenBusiness (Round Robin)
-  'amXuGoX3nvnldoRdsydJ', // Dein Start in dein ExpertenBusiness - Feven
-  'FVY1csPMX8c94zGGAPqu', // Dein Start in dein ExpertenBusiness - Monika
+  'Kp5IUHs4OPO9RfaVDvcM', // EB Business Talk Kate
+  'qpsXHyABTFFUxx1rCFnf', // EB Business Talk Andjelina
+  'xqyQ9YJAlrmHHZbfiCNs', // EB Business Talk Bianca
 ];
-// UNVERIFIED as of 2026-08-07: this launch had 0 CC bookings yet, so the CC mapping above
-// is by analogy to the MA funnel (Money Talk + two setter calendars). Re-check against the
-// live data as soon as "CC gebucht" turns non-zero.
+// Deliberately NOT in the CC list: "Dein Start in dein ExpertenBusiness" (q4qmXBET…,
+// amXuGoX3…, FVY1csPM…) and the unprefixed "Business Talk" (B7nzSMe3…). Those were the
+// placeholder guess before the EB calendars existed; they serve other funnels and had zero
+// bookings from this pipeline's contacts, so nothing is lost by excluding them.
 const KG_CALENDARS = [
-  'gNufujucY7UJaWHLqo3p', // Klarheitsgespräch - ExpertenBusiness (verified: both KG-stage contacts booked here)
+  'gNufujucY7UJaWHLqo3p', // Klarheitsgespräch - ExpertenBusiness (pre-cutover; holds the first real bookings)
+  'HTkugeU1qADzQsN8TgXE', // KG - EB - Feven
+  'TN9blFDziggEpqOh4Svh', // KG - EB - Monika
 ];
 const FU_CALENDARS = [
-  'g3rHhuPkT1kgeWQZ1Uy1', // Follow Up Feven Winde
-  'gCobK98dVDnJI5g3mgHa', // Follow Up Monika Beye
+  'QrDTBB2EzMCREySHG5Pe', // EB Follow Up Feven Winde
+  'oGGABGXQ1hPKpcZHr5Iy', // EB Follow Up Monika Beye
 ];
-// The "Roadmap Follow Up" calendars belong to a different funnel and stay out, same as
-// in the MA job. The two FU calendars above are shared with MA; the pipeline-contact
-// filter is what keeps the attribution clean. A contact sitting in both pipelines would
-// be counted on both Notion pages — accepted, and rare.
+// The MA follow-up calendars (g3rHhuPk…, gCobK98d…) are NOT in the FU list anymore. They
+// are read by notion-webinar-sync.ts; a contact in both pipelines would otherwise have
+// been counted on both Notion pages. The EB-specific calendars remove that overlap at the
+// source. The "Roadmap Follow Up" calendars belong to yet another funnel and stay out.
 
 // Contacts excluded from calendar counts (account owner / test bookings).
 const EXCLUDE_CONTACT_IDS = new Set<string>(['oJHByWHQvm7kYeT3o7d9']); // Annett Timinger
