@@ -89,14 +89,20 @@ const STAGES = {
 // and the never-decrease rule would freeze the stale number in Notion instead of exposing
 // the drop.
 const CC_CALENDARS = [
-  'Kp5IUHs4OPO9RfaVDvcM', // EB Business Talk Kate
-  'qpsXHyABTFFUxx1rCFnf', // EB Business Talk Andjelina
-  'xqyQ9YJAlrmHHZbfiCNs', // EB Business Talk Bianca
+  'q4qmXBET2dlVP1uKgndQ', // Dein Start in dein ExpertenBusiness (Round Robin) — STILL RECEIVING this launch's CC bookings
+  'amXuGoX3nvnldoRdsydJ', // Dein Start in dein ExpertenBusiness - Feven
+  'FVY1csPMX8c94zGGAPqu', // Dein Start in dein ExpertenBusiness - Monika
+  'Kp5IUHs4OPO9RfaVDvcM', // EB Business Talk Kate      (new, empty as of 11.08.2026)
+  'qpsXHyABTFFUxx1rCFnf', // EB Business Talk Andjelina (new, empty as of 11.08.2026)
+  'xqyQ9YJAlrmHHZbfiCNs', // EB Business Talk Bianca    (new, empty as of 11.08.2026)
 ];
-// Deliberately NOT in the CC list: "Dein Start in dein ExpertenBusiness" (q4qmXBET…,
-// amXuGoX3…, FVY1csPM…) and the unprefixed "Business Talk" (B7nzSMe3…). Those were the
-// placeholder guess before the EB calendars existed; they serve other funnels and had zero
-// bookings from this pipeline's contacts, so nothing is lost by excluding them.
+// Both generations are listed on purpose. Checked 11.08.2026: the three new EB Business
+// Talk calendars had 0 bookings, while "Dein Start in dein ExpertenBusiness" held 4
+// confirmed slots from contacts in THIS pipeline (11.08. and 13.08.) — the booking pages
+// evidently still point at the old calendar. Dropping the old one (as this file briefly
+// did) froze "CC gebucht" in Notion at the stale 1 the never-decrease rule was holding,
+// which is exactly the silent undercount the all-calendars rule above exists to prevent.
+// The unprefixed "Business Talk" (B7nzSMe3…) stays out: no bookings from this pipeline.
 const KG_CALENDARS = [
   'gNufujucY7UJaWHLqo3p', // Klarheitsgespräch - ExpertenBusiness (pre-cutover; holds the first real bookings)
   'HTkugeU1qADzQsN8TgXE', // KG - EB - Feven
