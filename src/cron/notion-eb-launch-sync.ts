@@ -19,10 +19,15 @@
  * "gebucht" produces a plausible-looking but wrong quota — the worst failure mode.
  *
  * The EB-prefixed calendars added later that day ARE launch-specific, which makes the
- * filter redundant for them — but it stays, for two reasons: the pre-cutover calendar is
- * still in the KG list, and the filter turns a mis-wired booking workflow into a visible
+ * filter redundant for them — but it stays, for two reasons: the pre-cutover calendars are
+ * still in every list, and the filter turns a mis-wired booking workflow into a visible
  * number ("nicht zugerechnet") instead of a wrong KPI. If that counter climbs while the
  * board shows bookings, the opportunity automation behind the new calendars is broken.
+ *
+ * Rule for the calendar lists (decision 11.08.2026): the new EB calendars are ADDITIONAL,
+ * never a replacement. An existing booking by a contact in this pipeline counts normally,
+ * whichever generation of calendar it sits in. Removing an old calendar is what breaks
+ * things — see the CC incident in the git history.
  *
  * So a booking counts only if the contact has an opportunity in THIS pipeline. Pipeline
  * membership (unlike stage membership) does not drain as the contact progresses, so this
@@ -109,29 +114,22 @@ const KG_CALENDARS = [
   'TN9blFDziggEpqOh4Svh', // KG - EB - Monika
 ];
 const FU_CALENDARS = [
+  'g3rHhuPkT1kgeWQZ1Uy1', // Follow Up Feven Winde   (pre-cutover, shared with the closed MA funnel)
+  'gCobK98dVDnJI5g3mgHa', // Follow Up Monika Beye   (pre-cutover, shared with the closed MA funnel)
   'QrDTBB2EzMCREySHG5Pe', // EB Follow Up Feven Winde
   'oGGABGXQ1hPKpcZHr5Iy', // EB Follow Up Monika Beye
 ];
-// Watch-only: the legacy shared follow-up calendars. NOT counted into any KPI — only
-// logged, so a booking that lands in the wrong calendar generation stays visible.
+// The two pre-cutover calendars count normally (decision 11.08.2026): an existing booking
+// by a contact in this pipeline is a booking for this launch, and the new EB calendars are
+// additional, not a replacement. notion-webinar-sync.ts was stopped the same day (Money
+// Alchemy closed), so there is no page these could be double-counted on.
 //
-// Originally excluded because notion-webinar-sync.ts read them and a contact in both
-// pipelines would have been counted on both Notion pages. That job was stopped on
-// 11.08.2026 (Money Alchemy closed), so nobody reads them now — but they still must not
-// feed EB's KPIs: checked 11.08.2026, the only two EB-pipeline contacts with bookings here
-// (Larissa Lieder 04.08. + 15.09., Marina Neumann 03.09.) each hold opportunities in BOTH
-// pipelines, so whether those follow-ups belong to this launch is undecidable from the
-// data. Counting them would feed "No-Show FU" a plausible-looking wrong pair, and the
-// never-decrease rule makes that permanent.
+// Known imprecision, accepted with that decision: the two contacts booked here as of
+// 11.08.2026 (Larissa Lieder 04.08. + 15.09., Marina Neumann 03.09.) each hold
+// opportunities in BOTH pipelines, so a follow-up of theirs from the MA era is not
+// distinguishable from an EB one and now counts as EB. Pipeline membership is the
+// attribution rule; where it is ambiguous, the booking lands on this launch.
 //
-// The fix belongs at the source: point the follow-up booking flow at the EB FU calendars.
-// Until then EB's FU count stays 0 — and the "nicht zugerechnet" counter would NOT catch
-// it, because those contacts are in the pipeline; the calendar simply is not read. Hence
-// this separate log line.
-const LEGACY_FU_CALENDARS_WATCH_ONLY = [
-  'g3rHhuPkT1kgeWQZ1Uy1', // Follow Up Feven Winde   (shared, pre-EB-cutover)
-  'gCobK98dVDnJI5g3mgHa', // Follow Up Monika Beye   (shared, pre-EB-cutover)
-];
 // The "Roadmap Follow Up" calendars belong to yet another funnel and stay out entirely.
 
 // Contacts excluded from calendar counts (account owner / test bookings).
@@ -336,11 +334,10 @@ async function main(): Promise<void> {
 
   // 2. Attribution basis + calendar counts.
   const pipelineContacts = await ghlPipelineContactIds(total);
-  const [cc, kg, fu, legacyFu] = await Promise.all([
+  const [cc, kg, fu] = await Promise.all([
     calendarCounts(CC_CALENDARS, pipelineContacts),
     calendarCounts(KG_CALENDARS, pipelineContacts),
     calendarCounts(FU_CALENDARS, pipelineContacts),
-    calendarCounts(LEGACY_FU_CALENDARS_WATCH_ONLY, pipelineContacts),
   ]);
 
   console.log(
@@ -355,14 +352,6 @@ async function main(): Promise<void> {
     `  nicht zugerechnet (Termin ohne Opportunity in dieser Pipeline): ` +
     `CC ${cc.foreign} · KG ${kg.foreign} · FU ${fu.foreign} Kontakte`
   );
-  if (legacyFu.gebucht > 0) {
-    console.warn(
-      `  ACHTUNG: ${legacyFu.gebucht} Kontakt(e) dieser Pipeline haben Follow-Up-Termine in den ` +
-      `ALTEN geteilten Kalendern (gebucht ${legacyFu.gebucht} / geführt ${legacyFu.gefuehrt}). ` +
-      `Diese zählen NICHT in "Follow-Up gebucht/geführt" — die Zuordnung ist bei Kontakten in ` +
-      `mehreren Pipelines nicht entscheidbar. Buchungsstrecke auf die EB-FU-Kalender umstellen.`
-    );
-  }
 
   // 3. Read current Notion values (needed for the never-decrease max-rule on all number fields).
   const cur = await notionGetNumbers(PAGE_ID, [
