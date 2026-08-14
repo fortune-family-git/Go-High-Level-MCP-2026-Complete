@@ -203,7 +203,14 @@ async function ghlPipelineContactIds(expectedTotal: number): Promise<Set<string>
   return contactIds;
 }
 
-interface CalEvent { id?: string; contactId?: string; appointmentStatus?: string; }
+interface CalEvent { id?: string; contactId?: string; appointmentStatus?: string; startTime?: string; }
+
+/** True if the slot already happened — the precondition for counting a call as "geführt". */
+function slotIsPast(startTime: string | undefined, nowMs: number): boolean {
+  if (!startTime) return false; // no slot time -> cannot claim the call took place
+  const ts = Date.parse(startTime);
+  return Number.isFinite(ts) && ts < nowMs;
+}
 
 /** All appointment events of one calendar within the count window. */
 async function ghlCalendarEvents(calendarId: string): Promise<CalEvent[]> {
@@ -225,16 +232,28 @@ async function ghlCalendarEvents(calendarId: string): Promise<CalEvent[]> {
  * Consolidate a call type across its calendars into distinct-contact counts, counting
  * only contacts that belong to this pipeline (see the file header for why).
  * gebucht  = distinct contacts with >=1 appointment (any status).
- * gefuehrt = distinct contacts with >=1 CONFIRMED appointment.
+ * gefuehrt = distinct contacts with >=1 CONFIRMED appointment WHOSE SLOT IS IN THE PAST.
  * Reschedules (cancelled + rebooked) collapse to one contact; owner/test contacts excluded.
+ *
+ * The past-slot condition is not a detail — it was the single biggest error in this job.
+ * This location has no "showed" status: a held call stays `confirmed`, a missed one is set
+ * to `noshow` by hand. So `confirmed` alone means "booked and not cancelled", which is just
+ * as true for a slot next week. Counting those as geführt inflated the KPI badly (checked
+ * 14.08.2026: Notion held CC geführt 16 and SC geführt 10 against actual 3 and 2) and, via
+ * the never-decrease rule, permanently. Example from that day: the calendar
+ * "Klarheitsgespräch ExpertenBusiness - Monika" had 9 bookings, 8 of them confirmed and
+ * ALL of those still in the future — the old rule reported 8 calls as held that nobody had
+ * had yet.
  */
 async function calendarCounts(
   calendarIds: string[],
   pipelineContactIds: Set<string>,
-): Promise<{ gebucht: number; gefuehrt: number; foreign: number }> {
+): Promise<{ gebucht: number; gefuehrt: number; offen: number; foreign: number }> {
   const events = (await Promise.all(calendarIds.map(ghlCalendarEvents))).flat();
+  const nowMs = Date.now();
   const seenAppt = new Set<string>();
-  const confirmedByContact = new Map<string, boolean>();
+  const heldByContact = new Map<string, boolean>();
+  const upcomingContacts = new Set<string>();
   const foreignContacts = new Set<string>();
 
   for (const e of events) {
@@ -248,13 +267,19 @@ async function calendarCounts(
       if (seenAppt.has(e.id)) continue; // de-dupe identical appointment objects
       seenAppt.add(e.id);
     }
-    const wasConfirmed = confirmedByContact.get(cid) === true;
-    confirmedByContact.set(cid, wasConfirmed || e.appointmentStatus === 'confirmed');
+    const isConfirmed = e.appointmentStatus === 'confirmed';
+    const held = isConfirmed && slotIsPast(e.startTime, nowMs);
+    heldByContact.set(cid, heldByContact.get(cid) === true || held);
+    if (isConfirmed && !held) upcomingContacts.add(cid);
   }
 
   let gefuehrt = 0;
-  for (const isConfirmed of confirmedByContact.values()) if (isConfirmed) gefuehrt++;
-  return { gebucht: confirmedByContact.size, gefuehrt, foreign: foreignContacts.size };
+  for (const held of heldByContact.values()) if (held) gefuehrt++;
+  // "offen" is only for the log: confirmed slots still ahead. Counting these as geführt was
+  // the bug; logging them makes the gap between gebucht and geführt explainable.
+  let offen = 0;
+  for (const cid of upcomingContacts) if (heldByContact.get(cid) !== true) offen++;
+  return { gebucht: heldByContact.size, gefuehrt, offen, foreign: foreignContacts.size };
 }
 
 /** Read the current numeric values of the given Notion number properties (for the max-rule). */
@@ -347,6 +372,10 @@ async function main(): Promise<void> {
   console.log(
     `Kalender (distinkte Kontakte AUS DIESER PIPELINE): CC ${cc.gebucht}/${cc.gefuehrt} | ` +
     `KG ${kg.gebucht}/${kg.gefuehrt} | FU ${fu.gebucht}/${fu.gefuehrt}  (gebucht/geführt)`
+  );
+  console.log(
+    `  noch offen (bestätigt, Termin liegt in der Zukunft — zählt NICHT als geführt): ` +
+    `CC ${cc.offen} · KG ${kg.offen} · FU ${fu.offen} Kontakte`
   );
   console.log(
     `  nicht zugerechnet (Termin ohne Opportunity in dieser Pipeline): ` +
