@@ -1,62 +1,58 @@
 /**
  * Daily GHL -> Notion KPI sync for the "2026-09 EB-Launch" record (ExpertenBusiness).
  *
- * Sibling of notion-webinar-sync.ts (Money Alchemy). Same eight KPI fields in the same
- * Notion "Promotions" database, but ONE IMPORTANT DIFFERENCE in the calendar part:
+ * Writes to the Notion page in the "Promotions" database, all from ONE source:
+ * the stage every opportunity of the GHL pipeline "26-08 Experten Business Workshop"
+ * currently sits in.
  *
- *   Anmeldungen, Verkäufe            -> GHL PIPELINE "26-08 Experten Business Workshop"
- *   CC gebucht / CC geführt          -> GHL CALENDARS, restricted to pipeline contacts
- *   SC gebucht / SC geführt          -> GHL CALENDARS, restricted to pipeline contacts
- *   Follow-Up gebucht / geführt      -> GHL CALENDARS, restricted to pipeline contacts
- * (Notion "SC" == GHL "KG".)
+ *   Anmeldungen, Verkäufe                        -> stage lists
+ *   CC gebucht / CC geführt                      -> stage lists ("ever booked / ever held")
+ *   SC gebucht / SC geführt                      -> stage lists   (Notion "SC" == GHL "KG")
+ *   Follow-Up gebucht                            -> stage list
+ *   Follow-Up geführt                            -> NOT written, see below
  *
- * WHY the extra restriction (decided 2026-08-07): the pre-cutover ExpertenBusiness
- * calendar is NOT launch-specific — "Klarheitsgespräch - ExpertenBusiness" has been taking
- * bookings continuously since June (evergreen funnel). A pure time window (what the MA job
- * does, and what works there) therefore attributes foreign bookings to this launch: on
- * 2026-08-07 that calendar had 5 August slots, of which only 2 belonged to contacts in
- * this pipeline. Since Notion computes "No-Show SC" as 1 - geführt/gebucht, an inflated
- * "gebucht" produces a plausible-looking but wrong quota — the worst failure mode.
+ * WHY STAGES AND NOT CALENDARS (decided 14.08.2026, after the calendar version produced
+ * badly wrong numbers): the KPI is "wer je ein CC gebucht hat". Two attempts to read that
+ * from booking calendars failed, and the check that settled it: of 32 contacts sitting in
+ * stages that can only be reached after a CC, 21 had NO appointment in any plausible CC
+ * calendar at all. The calls are spread over many calendars (Money Alchemy KG, Fortune
+ * Family Business Analyse, Roadmap, …) and the board is partly maintained by hand, so no
+ * calendar set reproduces it. The board is the authority; calendars are not.
  *
- * The EB-prefixed calendars added later that day ARE launch-specific, which makes the
- * filter redundant for them — but it stays, for two reasons: the pre-cutover calendars are
- * still in every list, and the filter turns a mis-wired booking workflow into a visible
- * number ("nicht zugerechnet") instead of a wrong KPI. If that counter climbs while the
- * board shows bookings, the opportunity automation behind the new calendars is broken.
+ * HOW "ever booked" IS MODELLED: a stage is a POSITION and drains as a contact advances,
+ * so a single stage can never answer "ever". Each metric is therefore the union of every
+ * stage that a contact can only have reached BY having had that call — "gebucht" includes
+ * the stage itself plus everything downstream, "geführt" is the same minus the stages that
+ * mean the call has not happened yet (still waiting, or no-show). Verified against the
+ * numbers given for 14.08. 11:36 (CC 25 booked / 14 held) and re-verified an hour later
+ * when two contacts had advanced: the booked total held at 25 while held rose to 16 —
+ * exactly what the metric must do.
  *
- * Rule for the calendar lists (decision 11.08.2026): the new EB calendars are ADDITIONAL,
- * never a replacement. An existing booking by a contact in this pipeline counts normally,
- * whichever generation of calendar it sits in. Removing an old calendar is what breaks
- * things — see the CC incident in the git history.
+ * Counted as DISTINCT CONTACTS, not opportunities: a contact with two opportunities in the
+ * pipeline must not count twice. All opportunities are paged once and every KPI is derived
+ * from that single snapshot, so the numbers are mutually consistent.
  *
- * So a booking counts only if the contact has an opportunity in THIS pipeline. Pipeline
- * membership (unlike stage membership) does not drain as the contact progresses, so this
- * also fixes the undercount a stage-based count would have: the one KG no-show sits in
- * stage "KG abgesagt / no show" and would be missing from "KG gebucht" entirely.
+ * All written fields use the never-decrease rule: value = max(computed, current Notion).
+ * That still matters with stage sums, because the four stages listed as OPEN below are
+ * excluded, so a contact moving into one of them would otherwise lower a "ever" metric.
  *
- * Counted as DISTINCT CONTACTS (a reschedule = cancelled + rebooked counts once), slot
- * time from LAUNCH_START onward, excluding the account owner (test bookings).
- * "gebucht" = distinct contacts with any appointment; "geführt" = with >=1 CONFIRMED one.
- *
- * The Notion "No-Show CC/SC/FU" fields are FORMULAS (1 - geführt/gebucht, as %) and are
- * computed automatically by Notion - this job does not (and cannot) write them.
- *
- * All number fields use the never-decrease rule: written value = max(computed, current Notion).
+ * The Notion "No-Show CC/SC/FU" and "Conversion …" fields are FORMULAS and are computed by
+ * Notion — this job does not (and cannot) write them.
  *
  * Run:      node dist/cron/notion-eb-launch-sync.js
- * Schedule: Railway cron "30 18 * * *" (= 20:30 Berlin summer time), own service
+ * Schedule: Railway cron "30 18 * * *" (= 20:30 Berlin summer time), service
+ *           ff-eb-launch-notion-sync
  *
  * Required env:
  *   GHL_API_KEY, GHL_LOCATION_ID, NOTION_TOKEN
  * Optional env:
  *   GHL_BASE_URL      (default https://services.leadconnectorhq.com)
- *   GHL_API_VERSION   (default 2023-02-21, used for the opportunities API)
+ *   GHL_API_VERSION   (default 2023-02-21)
  *   DRY_RUN=1         (compute + log, but do NOT write to Notion)
  */
 
 const GHL_BASE = process.env.GHL_BASE_URL || 'https://services.leadconnectorhq.com';
 const GHL_VERSION = process.env.GHL_API_VERSION || '2023-02-21';
-const GHL_CAL_VERSION = '2021-04-15'; // calendars API expects this version
 const GHL_KEY = process.env.GHL_API_KEY || '';
 const LOCATION_ID = process.env.GHL_LOCATION_ID || '';
 const NOTION_TOKEN = process.env.NOTION_TOKEN || '';
@@ -66,220 +62,157 @@ const DRY_RUN = process.env.DRY_RUN === '1' || process.env.DRY_RUN === 'true';
 const PIPELINE_ID = 'EKcP2CQvvVXJIdEXAb9y'; // "26-08 Experten Business Workshop"
 const PAGE_ID = '394828f7-cb43-8144-92b0-dd806a645a28'; // "2026-09 EB-Launch", DB Promotions
 
-// Pipeline stages used for Anmeldungen (registrations) and Verkäufe (sales).
-// Every metric is a LIST even when it currently holds one stage — stages get split
-// ("Kauf" -> Vollzahlung + Anzahlung), and a split must cost one line, not a bug hunt.
-const STAGES = {
-  // Subtracted from the pipeline total: opt-in page hits that never registered.
-  landingpage: [
-    '902fc1be-7e1a-42d9-9f5f-7bd9b64d0318', // Landingpage aufgerufen
-  ],
-  kauf: [
-    '4997363c-28db-47a6-8b97-177a7a90bd3b', // Kauf Vollzahlung
-    '19a918f2-52b9-48d8-8e87-f34e8d31146d', // Kauf Anzahlung
-  ],
+/**
+ * Every stage of the pipeline, by ID. Names are the state on 14.08.2026 and are for
+ * reading only — never match on them, they get renamed in production ("Angemeldet" ->
+ * "Lead" happened in the sibling pipeline).
+ */
+const S = {
+  landingpage:  '902fc1be-7e1a-42d9-9f5f-7bd9b64d0318', // Landingpage aufgerufen
+  lead:         '8495fb19-48b9-4d85-a571-02d150bf3338', // Lead
+  kunden:       'dab500c9-3e83-45e2-90dc-58db7052789a', // Kunden
+  umfrage:      'e54ad887-4dd9-4c31-9bf2-93443716dc80', // Umfrage ausgefüllt
+  ccGebucht:    '39fa403e-cafb-4981-8844-f9435d9c8208', // CC gebucht
+  ccNoShow:     'da38a6c9-7141-4077-aac5-46735641efa0', // CC abgesagt / no show
+  kgAusCC:      '71f1e3d3-30a3-4495-8a88-e056d5a3c469', // KG gebucht aus CC
+  kgDirekt:     '9e617e01-9eaf-4f92-96bd-63ca74a42e6c', // KG gebucht direkt
+  ccGefuehrt:   'df199572-f615-4a29-909c-91595292f5d1', // CC geführt / kein KG angeboten
+  kgGefuehrt:   'd70a41a4-9f66-489e-8dcb-fb6524b4bae3', // KG geführt / kein Angebot
+  kgNoShow:     '803c9e9a-9bed-4ff6-ad41-b7f17f8b2f5c', // KG abgesagt / no show
+  fuGebucht:    '9f46c119-1938-48ea-98f1-11055b856768', // FU gebucht
+  fuNoShow:     'ca522828-064c-4944-882b-c9196f5c7b20', // FU abgesagt / no show
+  zusage:       '360edae7-d66c-438f-8bf4-d50a37fbbf7f', // Zusage / Geldbeschaffung
+  kaufVoll:     '4997363c-28db-47a6-8b97-177a7a90bd3b', // Kauf Vollzahlung
+  kaufAnz:      '19a918f2-52b9-48d8-8e87-f34e8d31146d', // Kauf Anzahlung
+  fehlkauf:     '65781889-5bd5-4898-a8bf-7cb07857ebe5', // Fehlkauf
+  absage:       'ce66b09d-2ea0-4cc8-8b36-c4e49fa02e03', // Absage
+  noFit:        '2b6918c3-b0ac-4304-939d-2684f402c39d', // NO Fit
 };
-// Deliberately NOT counted as sales: "Zusage / Geldbeschaffung" (360edae7…, intent only),
-// "Fehlkauf" (65781889…), "Absage" (ce66b09d…), "NO Fit" (2b6918c3…).
 
-// Booking calendars per call type. Since 2026-08-07 this launch has its own EB-prefixed
-// calendars (created mid-launch, all empty at cutover), so the lists below are the
-// authoritative mapping rather than an analogy to the MA funnel.
-//
-// EVERY LIST MUST HOLD ALL CALENDARS OF ITS CALL TYPE — including the pre-cutover one.
-// Counting is de-duplicated per CONTACT across the whole list, so a lead who rebooks from
-// the old calendar to a new one, or switches from Kate to Bianca, counts once. Summing
-// per-calendar counts instead would double-count exactly those cases. Conversely, dropping
-// the old calendar from a list would silently lose the bookings already counted there —
-// and the never-decrease rule would freeze the stale number in Notion instead of exposing
-// the drop.
-const CC_CALENDARS = [
-  'q4qmXBET2dlVP1uKgndQ', // Dein Start in dein ExpertenBusiness (Round Robin) — STILL RECEIVING this launch's CC bookings
-  'amXuGoX3nvnldoRdsydJ', // Dein Start in dein ExpertenBusiness - Feven
-  'FVY1csPMX8c94zGGAPqu', // Dein Start in dein ExpertenBusiness - Monika
-  'Kp5IUHs4OPO9RfaVDvcM', // EB Business Talk Kate      (new, empty as of 11.08.2026)
-  'qpsXHyABTFFUxx1rCFnf', // EB Business Talk Andjelina (new, empty as of 11.08.2026)
-  'xqyQ9YJAlrmHHZbfiCNs', // EB Business Talk Bianca    (new, empty as of 11.08.2026)
-];
-// Both generations are listed on purpose. Checked 11.08.2026: the three new EB Business
-// Talk calendars had 0 bookings, while "Dein Start in dein ExpertenBusiness" held 4
-// confirmed slots from contacts in THIS pipeline (11.08. and 13.08.) — the booking pages
-// evidently still point at the old calendar. Dropping the old one (as this file briefly
-// did) froze "CC gebucht" in Notion at the stale 1 the never-decrease rule was holding,
-// which is exactly the silent undercount the all-calendars rule above exists to prevent.
-// The unprefixed "Business Talk" (B7nzSMe3…) stays out: no bookings from this pipeline.
-const KG_CALENDARS = [
-  'gNufujucY7UJaWHLqo3p', // Klarheitsgespräch - ExpertenBusiness (pre-cutover; holds the first real bookings)
-  'HTkugeU1qADzQsN8TgXE', // KG - EB - Feven
-  'TN9blFDziggEpqOh4Svh', // KG - EB - Monika
-];
-const FU_CALENDARS = [
-  'g3rHhuPkT1kgeWQZ1Uy1', // Follow Up Feven Winde   (pre-cutover, shared with the closed MA funnel)
-  'gCobK98dVDnJI5g3mgHa', // Follow Up Monika Beye   (pre-cutover, shared with the closed MA funnel)
-  'QrDTBB2EzMCREySHG5Pe', // EB Follow Up Feven Winde
-  'oGGABGXQ1hPKpcZHr5Iy', // EB Follow Up Monika Beye
-];
-// The two pre-cutover calendars count normally (decision 11.08.2026): an existing booking
-// by a contact in this pipeline is a booking for this launch, and the new EB calendars are
-// additional, not a replacement. notion-webinar-sync.ts was stopped the same day (Money
-// Alchemy closed), so there is no page these could be double-counted on.
-//
-// Known imprecision, accepted with that decision: the two contacts booked here as of
-// 11.08.2026 (Larissa Lieder 04.08. + 15.09., Marina Neumann 03.09.) each hold
-// opportunities in BOTH pipelines, so a follow-up of theirs from the MA era is not
-// distinguishable from an EB one and now counts as EB. Pipeline membership is the
-// attribution rule; where it is ambiguous, the booking lands on this launch.
-//
-// The "Roadmap Follow Up" calendars belong to yet another funnel and stay out entirely.
+/**
+ * OPEN, deliberately in no list (state 14.08.2026): `absage`, `noFit`, `kunden` can be set
+ * from anywhere on the board, so they do not prove a call happened; `kgDirekt` is by
+ * definition the route WITHOUT a CC, so it must never feed a CC metric (it does feed the SC
+ * ones). Together they held 4 contacts, so including them would raise CC to 36/24 instead
+ * of 32/20. Decide with the business side before adding any of them — and if `kgDirekt`
+ * ever becomes non-zero, note that a contact who buys via that route lands in `kaufVoll`
+ * and would then be counted as having had a CC.
+ */
+const METRICS: Record<string, string[]> = {
+  // Everyone who registered = everyone except the pure landing-page hits.
+  // Expressed as "all stages but landingpage" so a new stage cannot silently fall out.
+  anmeldungen: [
+    S.lead, S.kunden, S.umfrage, S.ccGebucht, S.ccNoShow, S.kgAusCC, S.kgDirekt,
+    S.ccGefuehrt, S.kgGefuehrt, S.kgNoShow, S.fuGebucht, S.fuNoShow, S.zusage,
+    S.kaufVoll, S.kaufAnz, S.fehlkauf, S.absage, S.noFit,
+  ],
+  verkaeufe: [S.kaufVoll, S.kaufAnz],
 
-// Contacts excluded from calendar counts (account owner / test bookings).
-const EXCLUDE_CONTACT_IDS = new Set<string>(['oJHByWHQvm7kYeT3o7d9']); // Annett Timinger
+  // CC: booked = the CC stage itself, its no-show, and everything only reachable after a CC.
+  ccGebucht: [
+    S.ccGebucht, S.ccNoShow, S.kgAusCC, S.ccGefuehrt, S.kgGefuehrt, S.kgNoShow,
+    S.fuGebucht, S.fuNoShow, S.zusage, S.kaufVoll, S.kaufAnz, S.fehlkauf,
+  ],
+  // held = the same, minus "still waiting for the CC" and "did not show up for it".
+  ccGefuehrt: [
+    S.kgAusCC, S.ccGefuehrt, S.kgGefuehrt, S.kgNoShow,
+    S.fuGebucht, S.fuNoShow, S.zusage, S.kaufVoll, S.kaufAnz, S.fehlkauf,
+  ],
 
-// Count window (slot time). The pipeline was created 2026-08-05 and took its first
-// opportunities on 2026-08-07; 01.08. is a safe lower bound that still excludes the
-// previous EB launch ("26-05 Experten-Business Workshop") on the same calendars.
-const LAUNCH_START_MS = Date.parse('2026-07-31T22:00:00Z'); // 01.08.2026 00:00 Europe/Berlin
-const WINDOW_END_MS = () => Date.now() + 200 * 24 * 60 * 60 * 1000; // +200 days, catches future slots
+  // SC (== GHL "KG"): both routes into the KG, plus everything only reachable after one.
+  scGebucht: [
+    S.kgAusCC, S.kgDirekt, S.kgGefuehrt, S.kgNoShow,
+    S.fuGebucht, S.fuNoShow, S.zusage, S.kaufVoll, S.kaufAnz, S.fehlkauf,
+  ],
+  scGefuehrt: [
+    S.kgGefuehrt, S.fuGebucht, S.fuNoShow, S.zusage, S.kaufVoll, S.kaufAnz, S.fehlkauf,
+  ],
 
-function ghlHeaders(version: string): Record<string, string> {
+  // FU: only the two FU stages prove a follow-up was booked. Anyone who had an FU and then
+  // moved on to Zusage/Kauf is indistinguishable from someone who got there straight from
+  // the KG, so this is a floor, not a total.
+  fuGebucht: [S.fuGebucht, S.fuNoShow],
+};
+
+/**
+ * "Follow-Up geführt" is deliberately NOT written: the board has no stage meaning "FU held"
+ * (there is `fuGebucht` and `fuNoShow`, but nothing behind them), so there is nothing to
+ * derive it from. Leaving it to manual upkeep is correct; inventing a value would feed the
+ * "No-Show FU" formula a number nobody can check. If it should be automatic, the board
+ * needs an "FU geführt" stage — then add it here.
+ */
+const NOTION_FIELDS = {
+  anmeldungen: 'Anmeldungen',
+  verkaeufe: 'Verkäufe',
+  ccGebucht: 'CC gebucht',
+  ccGefuehrt: 'CC geführt',
+  scGebucht: 'SC gebucht',
+  scGefuehrt: 'SC geführt',
+  fuGebucht: 'Follow-Up gebucht',
+} as const;
+
+/** Metrics written with plain overwrite; everything else uses the never-decrease rule. */
+const OVERWRITE_METRICS = new Set<string>(['anmeldungen', 'verkaeufe']);
+
+function ghlHeaders(): Record<string, string> {
   return {
     Authorization: `Bearer ${GHL_KEY}`,
-    Version: version,
+    Version: GHL_VERSION,
     Accept: 'application/json',
     // services.leadconnectorhq.com answers 403 / Cloudflare 1010 to default client UAs.
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
   };
 }
 
-/** Exact opportunity count in a stage (or the whole pipeline if stageId is empty), via meta.total. */
-async function ghlStageTotal(stageId: string): Promise<number> {
+/** Exact opportunity total of the pipeline, used to prove the paging below was complete. */
+async function ghlPipelineTotal(): Promise<number> {
   const q = new URLSearchParams({ location_id: LOCATION_ID, pipeline_id: PIPELINE_ID, limit: '1' });
-  if (stageId) q.set('pipeline_stage_id', stageId);
-  const res = await fetch(`${GHL_BASE}/opportunities/search?${q.toString()}`, { headers: ghlHeaders(GHL_VERSION) });
-  if (!res.ok) {
-    throw new Error(`GHL search failed (${res.status}) for stage ${stageId || 'ALL'}: ${await res.text()}`);
-  }
+  const res = await fetch(`${GHL_BASE}/opportunities/search?${q.toString()}`, { headers: ghlHeaders() });
+  if (!res.ok) throw new Error(`GHL total failed (${res.status}): ${await res.text()}`);
   const body: any = await res.json();
   const total = body?.meta?.total;
-  if (typeof total !== 'number') {
-    throw new Error(`GHL response missing numeric meta.total for stage ${stageId || 'ALL'}`);
-  }
+  if (typeof total !== 'number') throw new Error('GHL response missing numeric meta.total');
   return total;
 }
 
-/** Sum of the exact totals of several stages (a metric is always a list of stages). */
-async function ghlStageSum(stageIds: string[]): Promise<number[]> {
-  return Promise.all(stageIds.map(ghlStageTotal));
-}
+interface Opp { contactId?: string; pipelineStageId?: string; }
 
 /**
- * Every contact that has an opportunity in this pipeline — the attribution basis for the
- * calendar counts. Paginated; fails loud rather than returning a partial set, because a
- * silently short set would under-count every calendar KPI.
+ * Every opportunity of the pipeline, paged. Fails loud rather than returning a partial set:
+ * a short read would lower every KPI at once and look like a quiet week.
  */
-async function ghlPipelineContactIds(expectedTotal: number): Promise<Set<string>> {
-  const contactIds = new Set<string>();
+async function ghlAllOpportunities(expectedTotal: number): Promise<Opp[]> {
+  const out: Opp[] = [];
   let url =
     `${GHL_BASE}/opportunities/search?` +
     new URLSearchParams({ location_id: LOCATION_ID, pipeline_id: PIPELINE_ID, limit: '100' }).toString();
-  let seen = 0;
 
   for (let page = 1; page <= 200; page++) {
-    const res = await fetch(url, { headers: ghlHeaders(GHL_VERSION) });
+    const res = await fetch(url, { headers: ghlHeaders() });
     if (!res.ok) throw new Error(`GHL opportunity page ${page} failed (${res.status}): ${await res.text()}`);
     const body: any = await res.json();
     const opps: any[] = Array.isArray(body?.opportunities) ? body.opportunities : [];
-    for (const o of opps) if (o?.contactId) contactIds.add(o.contactId as string);
-    seen += opps.length;
-
+    for (const o of opps) out.push({ contactId: o?.contactId, pipelineStageId: o?.pipelineStageId });
     const next = body?.meta?.nextPageUrl;
     if (opps.length === 0 || !next || !body?.meta?.nextPage) break;
     url = next as string;
   }
 
-  if (seen < expectedTotal) {
-    throw new Error(`Pipeline paging incomplete: read ${seen} of ${expectedTotal} opportunities (aborting).`);
+  if (out.length < expectedTotal) {
+    throw new Error(`Pipeline paging incomplete: read ${out.length} of ${expectedTotal} opportunities (aborting).`);
   }
-  return contactIds;
+  return out;
 }
 
-interface CalEvent { id?: string; contactId?: string; appointmentStatus?: string; startTime?: string; }
-
-/** True if the slot already happened — the precondition for counting a call as "geführt". */
-function slotIsPast(startTime: string | undefined, nowMs: number): boolean {
-  if (!startTime) return false; // no slot time -> cannot claim the call took place
-  const ts = Date.parse(startTime);
-  return Number.isFinite(ts) && ts < nowMs;
-}
-
-/** All appointment events of one calendar within the count window. */
-async function ghlCalendarEvents(calendarId: string): Promise<CalEvent[]> {
-  const q = new URLSearchParams({
-    locationId: LOCATION_ID,
-    calendarId,
-    startTime: String(LAUNCH_START_MS),
-    endTime: String(WINDOW_END_MS()),
-  });
-  const res = await fetch(`${GHL_BASE}/calendars/events?${q.toString()}`, { headers: ghlHeaders(GHL_CAL_VERSION) });
-  if (!res.ok) {
-    throw new Error(`GHL calendar events failed (${res.status}) for calendar ${calendarId}: ${await res.text()}`);
+/** Distinct contacts sitting in any of the given stages. */
+function distinctContacts(opps: Opp[], stageIds: string[]): number {
+  const wanted = new Set(stageIds);
+  const contacts = new Set<string>();
+  for (const o of opps) {
+    if (!o.contactId || !o.pipelineStageId) continue;
+    if (wanted.has(o.pipelineStageId)) contacts.add(o.contactId);
   }
-  const body: any = await res.json();
-  return Array.isArray(body?.events) ? (body.events as CalEvent[]) : [];
-}
-
-/**
- * Consolidate a call type across its calendars into distinct-contact counts, counting
- * only contacts that belong to this pipeline (see the file header for why).
- * gebucht  = distinct contacts with >=1 appointment (any status).
- * gefuehrt = distinct contacts with >=1 CONFIRMED appointment WHOSE SLOT IS IN THE PAST.
- * Reschedules (cancelled + rebooked) collapse to one contact; owner/test contacts excluded.
- *
- * The past-slot condition is not a detail — it was the single biggest error in this job.
- * This location has no "showed" status: a held call stays `confirmed`, a missed one is set
- * to `noshow` by hand. So `confirmed` alone means "booked and not cancelled", which is just
- * as true for a slot next week. Counting those as geführt inflated the KPI badly (checked
- * 14.08.2026: Notion held CC geführt 16 and SC geführt 10 against actual 3 and 2) and, via
- * the never-decrease rule, permanently. Example from that day: the calendar
- * "Klarheitsgespräch ExpertenBusiness - Monika" had 9 bookings, 8 of them confirmed and
- * ALL of those still in the future — the old rule reported 8 calls as held that nobody had
- * had yet.
- */
-async function calendarCounts(
-  calendarIds: string[],
-  pipelineContactIds: Set<string>,
-): Promise<{ gebucht: number; gefuehrt: number; offen: number; foreign: number }> {
-  const events = (await Promise.all(calendarIds.map(ghlCalendarEvents))).flat();
-  const nowMs = Date.now();
-  const seenAppt = new Set<string>();
-  const heldByContact = new Map<string, boolean>();
-  const upcomingContacts = new Set<string>();
-  const foreignContacts = new Set<string>();
-
-  for (const e of events) {
-    const cid = e.contactId;
-    if (!cid || EXCLUDE_CONTACT_IDS.has(cid)) continue;
-    if (!pipelineContactIds.has(cid)) {
-      foreignContacts.add(cid); // logged, not counted: booking from another funnel/launch
-      continue;
-    }
-    if (e.id) {
-      if (seenAppt.has(e.id)) continue; // de-dupe identical appointment objects
-      seenAppt.add(e.id);
-    }
-    const isConfirmed = e.appointmentStatus === 'confirmed';
-    const held = isConfirmed && slotIsPast(e.startTime, nowMs);
-    heldByContact.set(cid, heldByContact.get(cid) === true || held);
-    if (isConfirmed && !held) upcomingContacts.add(cid);
-  }
-
-  let gefuehrt = 0;
-  for (const held of heldByContact.values()) if (held) gefuehrt++;
-  // "offen" is only for the log: confirmed slots still ahead. Counting these as geführt was
-  // the bug; logging them makes the gap between gebucht and geführt explainable.
-  let offen = 0;
-  for (const cid of upcomingContacts) if (heldByContact.get(cid) !== true) offen++;
-  return { gebucht: heldByContact.size, gefuehrt, offen, foreign: foreignContacts.size };
+  return contacts.size;
 }
 
 /** Read the current numeric values of the given Notion number properties (for the max-rule). */
@@ -315,7 +248,7 @@ async function notionPatchNumbers(pageId: string, values: Record<string, number>
   if (!res.ok) throw new Error(`Notion update failed (${res.status}): ${await res.text()}`);
 }
 
-/** Post an audit comment on the Notion page. Requires the integration to have "insert comment" capability. */
+/** Post an audit comment on the Notion page. Non-fatal if the integration cannot comment. */
 async function notionAddComment(pageId: string, text: string): Promise<void> {
   const res = await fetch('https://api.notion.com/v1/comments', {
     method: 'POST',
@@ -339,85 +272,58 @@ function berlinTimestamp(): string {
 }
 
 async function main(): Promise<void> {
-  const start = new Date().toISOString();
-  console.log(`[${start}] GHL->Notion EB-Launch sync start (DRY_RUN=${DRY_RUN})`);
+  console.log(`[${new Date().toISOString()}] GHL->Notion EB-Launch sync start (DRY_RUN=${DRY_RUN})`);
 
   const requiredEnv: Record<string, string> = { GHL_API_KEY: GHL_KEY, GHL_LOCATION_ID: LOCATION_ID, NOTION_TOKEN };
   for (const [name, value] of Object.entries(requiredEnv)) {
     if (!value) throw new Error(`Missing required env var: ${name}`);
   }
 
-  // 1. Pipeline counts for Anmeldungen + Verkäufe.
-  const [total, landingpageParts, kaufParts] = await Promise.all([
-    ghlStageTotal(''),
-    ghlStageSum(STAGES.landingpage),
-    ghlStageSum(STAGES.kauf),
-  ]);
-  const landingpage = landingpageParts.reduce((a, b) => a + b, 0);
-  const kauf = kaufParts.reduce((a, b) => a + b, 0);
-  const anmeldungen = total - landingpage;
+  // 1. One snapshot of the whole pipeline; every KPI is derived from it.
+  const total = await ghlPipelineTotal();
+  const opps = await ghlAllOpportunities(total);
+  const allContacts = new Set(opps.map((o) => o.contactId).filter(Boolean) as string[]);
+  console.log(`Pipeline: ${total} Opportunities, ${allContacts.size} distinkte Kontakte`);
 
-  // 2. Attribution basis + calendar counts.
-  const pipelineContacts = await ghlPipelineContactIds(total);
-  const [cc, kg, fu] = await Promise.all([
-    calendarCounts(CC_CALENDARS, pipelineContacts),
-    calendarCounts(KG_CALENDARS, pipelineContacts),
-    calendarCounts(FU_CALENDARS, pipelineContacts),
-  ]);
+  // 2. Stage occupancy, logged in full — this is what makes a number checkable weeks later.
+  const occupancy = Object.entries(S)
+    .map(([key, id]) => `${key}=${distinctContacts(opps, [id])}`)
+    .join(' ');
+  console.log(`Stages (distinkte Kontakte): ${occupancy}`);
 
-  console.log(
-    `Pipeline: total=${total} landingpage=${landingpage} -> Anmeldungen=${anmeldungen} | ` +
-    `Kauf=${kauf} (${kaufParts.join(' + ')}) | Kontakte in Pipeline=${pipelineContacts.size}`
-  );
-  console.log(
-    `Kalender (distinkte Kontakte AUS DIESER PIPELINE): CC ${cc.gebucht}/${cc.gefuehrt} | ` +
-    `KG ${kg.gebucht}/${kg.gefuehrt} | FU ${fu.gebucht}/${fu.gefuehrt}  (gebucht/geführt)`
-  );
-  console.log(
-    `  noch offen (bestätigt, Termin liegt in der Zukunft — zählt NICHT als geführt): ` +
-    `CC ${cc.offen} · KG ${kg.offen} · FU ${fu.offen} Kontakte`
-  );
-  console.log(
-    `  nicht zugerechnet (Termin ohne Opportunity in dieser Pipeline): ` +
-    `CC ${cc.foreign} · KG ${kg.foreign} · FU ${fu.foreign} Kontakte`
-  );
+  // 3. Metrics.
+  const computed: Record<string, number> = {};
+  for (const [metric, stageIds] of Object.entries(METRICS)) {
+    computed[metric] = distinctContacts(opps, stageIds);
+  }
 
-  // 3. Read current Notion values (needed for the never-decrease max-rule on all number fields).
-  const cur = await notionGetNumbers(PAGE_ID, [
-    'Anmeldungen', 'Verkäufe',
-    'CC gebucht', 'CC geführt', 'SC gebucht', 'SC geführt', 'Follow-Up gebucht', 'Follow-Up geführt',
-  ]);
+  // 4. Current Notion values (needed for the never-decrease rule).
+  const fieldNames = Object.values(NOTION_FIELDS) as string[];
+  const cur = await notionGetNumbers(PAGE_ID, fieldNames);
 
-  // 4. Compute the target values. Every field is never-decrease: max(computed, current Notion).
-  const values: Record<string, number> = {
-    Anmeldungen: Math.max(anmeldungen, cur['Anmeldungen']),
-    'Verkäufe': Math.max(kauf, cur['Verkäufe']),
-    'CC gebucht': Math.max(cc.gebucht, cur['CC gebucht']),
-    'CC geführt': Math.max(cc.gefuehrt, cur['CC geführt']),
-    'SC gebucht': Math.max(kg.gebucht, cur['SC gebucht']),
-    'SC geführt': Math.max(kg.gefuehrt, cur['SC geführt']),
-    'Follow-Up gebucht': Math.max(fu.gebucht, cur['Follow-Up gebucht']),
-    'Follow-Up geführt': Math.max(fu.gefuehrt, cur['Follow-Up geführt']),
-  };
-
-  console.log('Field mapping (all never-decrease):');
-  console.log(`  Anmeldungen       = max(${total} - ${landingpage} = ${anmeldungen}, Notion ${cur['Anmeldungen']}) = ${values['Anmeldungen']}`);
-  console.log(`  Verkäufe          = max(Kauf ${kauf}, Notion ${cur['Verkäufe']}) = ${values['Verkäufe']}`);
-  console.log(`  CC gebucht        = max(Kal ${cc.gebucht}, Notion ${cur['CC gebucht']}) = ${values['CC gebucht']}`);
-  console.log(`  CC geführt        = max(Kal ${cc.gefuehrt}, Notion ${cur['CC geführt']}) = ${values['CC geführt']}`);
-  console.log(`  SC gebucht        = max(Kal ${kg.gebucht}, Notion ${cur['SC gebucht']}) = ${values['SC gebucht']}`);
-  console.log(`  SC geführt        = max(Kal ${kg.gefuehrt}, Notion ${cur['SC geführt']}) = ${values['SC geführt']}`);
-  console.log(`  Follow-Up gebucht = max(Kal ${fu.gebucht}, Notion ${cur['Follow-Up gebucht']}) = ${values['Follow-Up gebucht']}`);
-  console.log(`  Follow-Up geführt = max(Kal ${fu.gefuehrt}, Notion ${cur['Follow-Up geführt']}) = ${values['Follow-Up geführt']}`);
-  console.log('  (No-Show CC/SC/FU sind Notion-Formeln = 1 - geführt/gebucht, werden automatisch berechnet.)');
+  // 5. Target values + the full arithmetic in the log.
+  const values: Record<string, number> = {};
+  console.log('Mapping:');
+  for (const [metric, field] of Object.entries(NOTION_FIELDS)) {
+    const c = computed[metric] ?? 0;
+    const overwrite = OVERWRITE_METRICS.has(metric);
+    const value = overwrite ? c : Math.max(c, cur[field]);
+    values[field] = value;
+    console.log(
+      overwrite
+        ? `  ${field.padEnd(18)} = ${c} (overwrite)`
+        : `  ${field.padEnd(18)} = max(Stages ${c}, Notion ${cur[field]}) = ${value}`
+    );
+  }
+  console.log('  Follow-Up geführt  = nicht geschrieben (keine Stage dafür, manuell gepflegt)');
+  console.log('  (No-Show + Conversion sind Notion-Formeln und werden dort berechnet.)');
 
   const commentText =
     `🔄 Railway-Sync EB ${berlinTimestamp()} — ` +
     `Anmeldungen ${values['Anmeldungen']} · Verkäufe ${values['Verkäufe']} · ` +
     `CC ${values['CC gebucht']}/${values['CC geführt']} · SC ${values['SC gebucht']}/${values['SC geführt']} · ` +
-    `FU ${values['Follow-Up gebucht']}/${values['Follow-Up geführt']} (gebucht/geführt)`;
+    `FU gebucht ${values['Follow-Up gebucht']}`;
 
-  // 5. Write (unless dry run).
   if (DRY_RUN) {
     console.log('DRY_RUN active -> nothing written to Notion.');
     console.log('DRY_RUN would post comment:', commentText);
@@ -426,8 +332,6 @@ async function main(): Promise<void> {
   await notionPatchNumbers(PAGE_ID, values);
   console.log(`[${new Date().toISOString()}] Notion page ${PAGE_ID} properties updated OK.`);
 
-  // 6. Audit comment. Non-fatal: the KPI write already succeeded, so a comment
-  //    failure (e.g. integration lacks comment capability) must not fail the run.
   try {
     await notionAddComment(PAGE_ID, commentText);
     console.log('Audit comment posted.');
