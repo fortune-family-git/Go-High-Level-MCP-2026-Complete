@@ -8,8 +8,12 @@
  *   Anmeldungen, Verkäufe                        -> stage lists
  *   CC gebucht / CC geführt                      -> stage lists ("ever booked / ever held")
  *   SC gebucht / SC geführt                      -> stage lists   (Notion "SC" == GHL "KG")
- *   Follow-Up gebucht                            -> stage list
- *   Follow-Up geführt                            -> NOT written, see below
+ *   Follow-Up gebucht / geführt                  -> CALENDARS, see FU_CALENDARS
+ *
+ * Follow-Up is the deliberate exception: the board hardly tracks it (stage "FU gebucht"
+ * held 1 contact on 14.08.2026 while the follow-up calendars held 6, 3 of them already
+ * done), and unlike the CC calls, follow-ups are not scattered across many calendars.
+ * Source per metric follows the data, not a preference for one system.
  *
  * WHY STAGES AND NOT CALENDARS (decided 14.08.2026, after the calendar version produced
  * badly wrong numbers): the KPI is "wer je ein CC gebucht hat". Two attempts to read that
@@ -128,19 +132,39 @@ const METRICS: Record<string, string[]> = {
     S.kgGefuehrt, S.fuGebucht, S.fuNoShow, S.zusage, S.kaufVoll, S.kaufAnz, S.fehlkauf,
   ],
 
-  // FU: only the two FU stages prove a follow-up was booked. Anyone who had an FU and then
-  // moved on to Zusage/Kauf is indistinguishable from someone who got there straight from
-  // the KG, so this is a floor, not a total.
-  fuGebucht: [S.fuGebucht, S.fuNoShow],
+  // NOTE: Follow-Up is NOT in this map — it comes from calendars, see FU_CALENDARS below.
 };
 
 /**
- * "Follow-Up geführt" is deliberately NOT written: the board has no stage meaning "FU held"
- * (there is `fuGebucht` and `fuNoShow`, but nothing behind them), so there is nothing to
- * derive it from. Leaving it to manual upkeep is correct; inventing a value would feed the
- * "No-Show FU" formula a number nobody can check. If it should be automatic, the board
- * needs an "FU geführt" stage — then add it here.
+ * Follow-Up is the one metric that does NOT come from the board, because the board barely
+ * tracks it: on 14.08.2026 the stage "FU gebucht" held 1 contact while the follow-up
+ * calendars held 6 (3 of them already done). Nobody moves an opportunity into an FU stage
+ * reliably, so a stage-based FU would report a fraction of reality.
+ *
+ * Follow-Ups also do not have the scattering problem that made calendars useless for CC:
+ * they live in exactly these two calendar families, so the calendar IS the record here.
+ *
+ * Both generations are listed. The "ExpertenBusiness Follow Up" calendars are dedicated to
+ * this launch but were still EMPTY on 14.08.2026 — every actual follow-up sat in the older
+ * shared pair. Removing those would report 0. (Rule from 11.08.2026: new calendars are
+ * additional, never a replacement.)
  */
+const FU_CALENDARS = [
+  'g3rHhuPkT1kgeWQZ1Uy1', // Follow Up Feven Winde                 (shared, currently the only one in use)
+  'gCobK98dVDnJI5g3mgHa', // Follow Up Monika Beye                 (shared)
+  'QrDTBB2EzMCREySHG5Pe', // ExpertenBusiness Follow Up Feven Winde (dedicated, empty on 14.08.2026)
+  'oGGABGXQ1hPKpcZHr5Iy', // ExpertenBusiness Follow Up Monika Beye (dedicated, empty on 14.08.2026)
+];
+// The shared pair is also read by notion-webinar-sync.ts — which was stopped on 11.08.2026
+// (Money Alchemy closed), so nothing is counted on two Notion pages. If that job is ever
+// restarted, this overlap has to be resolved first.
+// "Roadmap Follow Up" belongs to a different funnel and stays out.
+
+const GHL_CAL_VERSION = '2021-04-15'; // calendars API expects this version
+const EXCLUDE_CONTACT_IDS = new Set<string>(['oJHByWHQvm7kYeT3o7d9']); // account owner / test bookings
+const FU_WINDOW_START_MS = Date.parse('2026-07-31T22:00:00Z'); // 01.08.2026 00:00 Europe/Berlin
+const FU_WINDOW_END_MS = () => Date.now() + 200 * 24 * 60 * 60 * 1000;
+
 const NOTION_FIELDS = {
   anmeldungen: 'Anmeldungen',
   verkaeufe: 'Verkäufe',
@@ -149,6 +173,7 @@ const NOTION_FIELDS = {
   scGebucht: 'SC gebucht',
   scGefuehrt: 'SC geführt',
   fuGebucht: 'Follow-Up gebucht',
+  fuGefuehrt: 'Follow-Up geführt',
 } as const;
 
 /** Metrics written with plain overwrite; everything else uses the never-decrease rule. */
@@ -202,6 +227,68 @@ async function ghlAllOpportunities(expectedTotal: number): Promise<Opp[]> {
     throw new Error(`Pipeline paging incomplete: read ${out.length} of ${expectedTotal} opportunities (aborting).`);
   }
   return out;
+}
+
+interface CalEvent { id?: string; contactId?: string; appointmentStatus?: string; startTime?: string; }
+
+/** All appointment events of one calendar within the count window. */
+async function ghlCalendarEvents(calendarId: string): Promise<CalEvent[]> {
+  const q = new URLSearchParams({
+    locationId: LOCATION_ID,
+    calendarId,
+    startTime: String(FU_WINDOW_START_MS),
+    endTime: String(FU_WINDOW_END_MS()),
+  });
+  const res = await fetch(`${GHL_BASE}/calendars/events?${q.toString()}`, {
+    headers: { ...ghlHeaders(), Version: GHL_CAL_VERSION },
+  });
+  if (!res.ok) {
+    throw new Error(`GHL calendar events failed (${res.status}) for calendar ${calendarId}: ${await res.text()}`);
+  }
+  const body: any = await res.json();
+  return Array.isArray(body?.events) ? (body.events as CalEvent[]) : [];
+}
+
+/**
+ * Follow-Up counts from the calendars, restricted to contacts of this pipeline.
+ * gebucht  = distinct contacts with >=1 appointment (any status; a cancelled one was booked).
+ * geführt  = distinct contacts with >=1 CONFIRMED appointment whose slot is IN THE PAST.
+ *
+ * The past-slot condition is not a detail. This location has no "showed" status: a held call
+ * stays `confirmed`, a missed one is set to `noshow` by hand. So `confirmed` alone means
+ * "booked and not cancelled" — just as true for a slot next week. Counting those as geführt
+ * inflated the KPI badly and, via the never-decrease rule, permanently.
+ */
+async function followUpCounts(
+  pipelineContacts: Set<string>,
+): Promise<{ gebucht: number; gefuehrt: number; offen: number; foreign: number }> {
+  const events = (await Promise.all(FU_CALENDARS.map(ghlCalendarEvents))).flat();
+  const nowMs = Date.now();
+  const seenAppt = new Set<string>();
+  const heldByContact = new Map<string, boolean>();
+  const upcoming = new Set<string>();
+  const foreign = new Set<string>();
+
+  for (const e of events) {
+    const cid = e.contactId;
+    if (!cid || EXCLUDE_CONTACT_IDS.has(cid)) continue;
+    if (!pipelineContacts.has(cid)) { foreign.add(cid); continue; }
+    if (e.id) {
+      if (seenAppt.has(e.id)) continue; // de-dupe identical appointment objects
+      seenAppt.add(e.id);
+    }
+    const confirmed = e.appointmentStatus === 'confirmed';
+    const ts = e.startTime ? Date.parse(e.startTime) : NaN;
+    const held = confirmed && Number.isFinite(ts) && ts < nowMs;
+    heldByContact.set(cid, heldByContact.get(cid) === true || held);
+    if (confirmed && !held) upcoming.add(cid);
+  }
+
+  let gefuehrt = 0;
+  for (const held of heldByContact.values()) if (held) gefuehrt++;
+  let offen = 0;
+  for (const cid of upcoming) if (heldByContact.get(cid) !== true) offen++;
+  return { gebucht: heldByContact.size, gefuehrt, offen, foreign: foreign.size };
 }
 
 /** Distinct contacts sitting in any of the given stages. */
@@ -291,11 +378,19 @@ async function main(): Promise<void> {
     .join(' ');
   console.log(`Stages (distinkte Kontakte): ${occupancy}`);
 
-  // 3. Metrics.
+  // 3. Metrics: everything from stages, except Follow-Up which comes from the calendars.
   const computed: Record<string, number> = {};
   for (const [metric, stageIds] of Object.entries(METRICS)) {
     computed[metric] = distinctContacts(opps, stageIds);
   }
+  const fu = await followUpCounts(allContacts);
+  computed.fuGebucht = fu.gebucht;
+  computed.fuGefuehrt = fu.gefuehrt;
+  console.log(
+    `Follow-Up aus Kalendern (Kontakte dieser Pipeline): gebucht=${fu.gebucht} geführt=${fu.gefuehrt} ` +
+    `noch offen=${fu.offen} | nicht zugerechnet (kein Opp in dieser Pipeline)=${fu.foreign} · ` +
+    `Board-Stage "FU gebucht"=${distinctContacts(opps, [S.fuGebucht])} (bewusst nicht verwendet, siehe Kommentar)`
+  );
 
   // 4. Current Notion values (needed for the never-decrease rule).
   const fieldNames = Object.values(NOTION_FIELDS) as string[];
@@ -315,14 +410,13 @@ async function main(): Promise<void> {
         : `  ${field.padEnd(18)} = max(Stages ${c}, Notion ${cur[field]}) = ${value}`
     );
   }
-  console.log('  Follow-Up geführt  = nicht geschrieben (keine Stage dafür, manuell gepflegt)');
   console.log('  (No-Show + Conversion sind Notion-Formeln und werden dort berechnet.)');
 
   const commentText =
     `🔄 Railway-Sync EB ${berlinTimestamp()} — ` +
     `Anmeldungen ${values['Anmeldungen']} · Verkäufe ${values['Verkäufe']} · ` +
     `CC ${values['CC gebucht']}/${values['CC geführt']} · SC ${values['SC gebucht']}/${values['SC geführt']} · ` +
-    `FU gebucht ${values['Follow-Up gebucht']}`;
+    `FU ${values['Follow-Up gebucht']}/${values['Follow-Up geführt']} (gebucht/geführt)`;
 
   if (DRY_RUN) {
     console.log('DRY_RUN active -> nothing written to Notion.');
