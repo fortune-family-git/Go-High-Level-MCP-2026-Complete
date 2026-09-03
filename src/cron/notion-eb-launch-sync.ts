@@ -88,6 +88,8 @@ const S = {
   fuGebucht:    '9f46c119-1938-48ea-98f1-11055b856768', // FU gebucht
   fuNoShow:     'ca522828-064c-4944-882b-c9196f5c7b20', // FU abgesagt / no show
   zusage:       '360edae7-d66c-438f-8bf4-d50a37fbbf7f', // Zusage / Geldbeschaffung
+  zusageFRA:    '013b74d4-da1f-4e59-aa9b-3524b185e0d1', // Zusage FRA        (neu, 03.09.2026)
+  zahlungFRA:   'c2e4a18c-97d6-4fb7-a21a-15ba63646896', // Zahlung FRA       (neu, 03.09.2026)
   kaufVoll:     '4997363c-28db-47a6-8b97-177a7a90bd3b', // Kauf Vollzahlung
   kaufAnz:      '19a918f2-52b9-48d8-8e87-f34e8d31146d', // Kauf Anzahlung
   fehlkauf:     '65781889-5bd5-4898-a8bf-7cb07857ebe5', // Fehlkauf
@@ -105,33 +107,32 @@ const S = {
  * and would then be counted as having had a CC.
  */
 const METRICS: Record<string, string[]> = {
-  // Everyone who registered = everyone except the pure landing-page hits.
-  // Expressed as "all stages but landingpage" so a new stage cannot silently fall out.
-  anmeldungen: [
-    S.lead, S.kunden, S.umfrage, S.ccGebucht, S.ccNoShow, S.kgAusCC, S.kgDirekt,
-    S.ccGefuehrt, S.kgGefuehrt, S.kgNoShow, S.fuGebucht, S.fuNoShow, S.zusage,
-    S.kaufVoll, S.kaufAnz, S.fehlkauf, S.absage, S.noFit,
-  ],
+  // Anmeldungen is NOT listed here — it is "everyone except the pure landing-page hits" and
+  // is computed by SUBTRACTING that one stage (see anmeldungenCount). An enumerated list was
+  // wrong: when "Zusage FRA" appeared on 03.09.2026, its contact silently dropped out of
+  // Anmeldungen (1624 instead of 1625) — and the comment here claimed that could not happen.
   verkaeufe: [S.kaufVoll, S.kaufAnz],
+  // "Zahlung FRA" is deliberately NOT counted as a sale yet: unclear whether a Frankfurt
+  // payment is a sale of THIS programme. 0 contacts as of 03.09.2026 — decide before it fills.
 
   // CC: booked = the CC stage itself, its no-show, and everything only reachable after a CC.
   ccGebucht: [
     S.ccGebucht, S.ccNoShow, S.kgAusCC, S.ccGefuehrt, S.kgGefuehrt, S.kgNoShow,
-    S.fuGebucht, S.fuNoShow, S.zusage, S.kaufVoll, S.kaufAnz, S.fehlkauf,
+    S.fuGebucht, S.fuNoShow, S.zusage, S.zusageFRA, S.zahlungFRA, S.kaufVoll, S.kaufAnz, S.fehlkauf,
   ],
   // held = the same, minus "still waiting for the CC" and "did not show up for it".
   ccGefuehrt: [
     S.kgAusCC, S.ccGefuehrt, S.kgGefuehrt, S.kgNoShow,
-    S.fuGebucht, S.fuNoShow, S.zusage, S.kaufVoll, S.kaufAnz, S.fehlkauf,
+    S.fuGebucht, S.fuNoShow, S.zusage, S.zusageFRA, S.zahlungFRA, S.kaufVoll, S.kaufAnz, S.fehlkauf,
   ],
 
   // SC (== GHL "KG"): both routes into the KG, plus everything only reachable after one.
   scGebucht: [
     S.kgAusCC, S.kgDirekt, S.kgGefuehrt, S.kgNoShow,
-    S.fuGebucht, S.fuNoShow, S.zusage, S.kaufVoll, S.kaufAnz, S.fehlkauf,
+    S.fuGebucht, S.fuNoShow, S.zusage, S.zusageFRA, S.zahlungFRA, S.kaufVoll, S.kaufAnz, S.fehlkauf,
   ],
   scGefuehrt: [
-    S.kgGefuehrt, S.fuGebucht, S.fuNoShow, S.zusage, S.kaufVoll, S.kaufAnz, S.fehlkauf,
+    S.kgGefuehrt, S.fuGebucht, S.fuNoShow, S.zusage, S.zusageFRA, S.zahlungFRA, S.kaufVoll, S.kaufAnz, S.fehlkauf,
   ],
 
   // NOTE: Follow-Up is NOT in this map — it comes from calendars, see FU_CALENDARS below.
@@ -376,6 +377,21 @@ function distinctContacts(opps: Opp[], stageIds: string[], exclude?: Set<string>
   return contacts.size;
 }
 
+/**
+ * Distinct contacts holding at least one opportunity OUTSIDE the given stages.
+ * Used for Anmeldungen: subtracting the landing-page stage is robust against new stages,
+ * an enumerated "all the others" list is not (see the METRICS comment).
+ */
+function distinctContactsOutside(opps: Opp[], stageIds: string[]): number {
+  const skip = new Set(stageIds);
+  const contacts = new Set<string>();
+  for (const o of opps) {
+    if (!o.contactId || !o.pipelineStageId) continue;
+    if (!skip.has(o.pipelineStageId)) contacts.add(o.contactId);
+  }
+  return contacts.size;
+}
+
 /** Contacts currently sitting in one of the given stages. */
 function contactsInStages(opps: Opp[], stageIds: string[]): Set<string> {
   const wanted = new Set(stageIds);
@@ -462,6 +478,24 @@ async function main(): Promise<void> {
     .join(' ');
   console.log(`Stages (distinkte Kontakte): ${occupancy}`);
 
+  // Unknown stage IDs mean the pipeline was rebuilt. Warn loudly instead of quietly
+  // leaving those contacts out of every metric — that is how "Zusage FRA" cost one
+  // Anmeldung on 03.09.2026 before anyone noticed.
+  const knownStages = new Set(Object.values(S));
+  const unknown = new Map<string, number>();
+  for (const o of opps) {
+    if (o.pipelineStageId && !knownStages.has(o.pipelineStageId)) {
+      unknown.set(o.pipelineStageId, (unknown.get(o.pipelineStageId) ?? 0) + 1);
+    }
+  }
+  if (unknown.size > 0) {
+    console.warn(
+      `WARNUNG: ${unknown.size} unbekannte Stage(s) in der Pipeline — diese Kontakte fehlen in ` +
+      `CC/SC/Verkäufe, bis die IDs eingetragen sind: ` +
+      [...unknown.entries()].map(([id, n]) => `${id} (${n} Opps)`).join(', ')
+    );
+  }
+
   // 3. The direct-KG route: remember it, because the board forgets it (see the block above
   //    DIRECT_MARKER_PREFIX for why nothing else works).
   //    Reading the marker needs the integration's "read comments" capability. It writes
@@ -512,6 +546,9 @@ async function main(): Promise<void> {
       console.log(`  ${metric}: ${ohne} ohne Bereinigung -> ${computed[metric]} nach Abzug der Direktbucher`);
     }
   }
+  // Anmeldungen: alles ausser der Landingpage-Stage, per Subtraktion statt Aufzaehlung.
+  computed.anmeldungen = distinctContactsOutside(opps, [S.landingpage]);
+
   const fu = await followUpCounts(allContacts);
   computed.fuGebucht = fu.gebucht;
   computed.fuGefuehrt = fu.gefuehrt;
