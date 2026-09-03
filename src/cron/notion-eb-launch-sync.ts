@@ -1,9 +1,10 @@
 /**
  * Daily GHL -> Notion KPI sync for the "2026-09 EB-Launch" record (ExpertenBusiness).
  *
- * Writes to the Notion page in the "Promotions" database, all from ONE source:
- * the stage every opportunity of the GHL pipeline "26-08 Experten Business Workshop"
- * currently sits in.
+ * Writes to the Notion page in the "Promotions" database. Main source is the stage every
+ * opportunity of the GHL pipeline "26-08 Experten Business Workshop" currently sits in;
+ * Follow-Up comes from the launch's own calendars, and the "KG gebucht direkt" route is
+ * remembered across runs because the board cannot answer it (see DIRECT_MARKER_PREFIX).
  *
  *   Anmeldungen, Verkäufe                        -> stage lists
  *   CC gebucht / CC geführt                      -> stage lists ("ever booked / ever held")
@@ -182,6 +183,75 @@ const NOTION_FIELDS = {
 /** Metrics written with plain overwrite; everything else uses the never-decrease rule. */
 const OVERWRITE_METRICS = new Set<string>(['anmeldungen', 'verkaeufe']);
 
+/**
+ * ---------------------------------------------------------------------------------------
+ * Remembering the "KG gebucht direkt" route
+ * ---------------------------------------------------------------------------------------
+ * The board distinguishes the two ways into a KG exactly once — at the booking step
+ * (`kgAusCC` vs `kgDirekt`). Everything behind it (`kgGefuehrt`, `kgNoShow`, `fuGebucht`,
+ * `fuNoShow`, `zusage`, `kauf*`, `fehlkauf`) is shared, so as soon as a direct booker
+ * advances, the stage no longer shows that they never had a CC — and they inflate the CC
+ * metrics, which are built as "the CC stage plus everything downstream".
+ *
+ * Reconstructing the route afterwards is impossible from the data. All of this was tested
+ * on 03.09.2026 against the two groups whose route IS known (`kgAusCC` = had a CC,
+ * `kgDirekt` = had none):
+ *   - No history/audit endpoint exists (404 on /opportunities/{id}/history|audit|timeline).
+ *   - No contact tag separates them (tags describe webinar attendance, not the call route).
+ *   - "has an appointment in a CC calendar": 67/77 vs 3/8 — wrong in both directions.
+ *   - "attribution on the CC booking widget (business-analyse-fortune-family…)": perfectly
+ *     specific (0/8 direct bookers, 0/770 leads) but only ~50% sensitive, so its ABSENCE
+ *     proves nothing and it cannot be used to exclude anybody.
+ * Upper bound of the error at that time: 32 of 269 (loose — most of those 32 likely did
+ * have a CC).
+ *
+ * So the job has to remember. It stores the accumulated set of contacts it has ever seen in
+ * `kgDirekt` in its own Notion audit comment, as a machine-readable marker. That needs no
+ * extra infrastructure, writes nothing to the CRM, and stays auditable where the KPI lives.
+ * Every run rewrites the COMPLETE set, so reading the newest marker is enough.
+ */
+const DIRECT_MARKER_PREFIX = '[[kgdirekt:';
+const DIRECT_MARKER_SUFFIX = ']]';
+const NOTION_COMMENT_LIMIT = 4096; // bytes of UTF-8, hard API limit
+
+/** All comment texts on the page, newest last. */
+async function notionGetComments(pageId: string): Promise<string[]> {
+  const out: string[] = [];
+  let cursor: string | undefined;
+  do {
+    const q = new URLSearchParams({ block_id: pageId, page_size: '100' });
+    if (cursor) q.set('start_cursor', cursor);
+    const res = await fetch(`https://api.notion.com/v1/comments?${q.toString()}`, {
+      headers: { Authorization: `Bearer ${NOTION_TOKEN}`, 'Notion-Version': NOTION_VERSION },
+    });
+    if (!res.ok) throw new Error(`Notion comment read failed (${res.status}): ${await res.text()}`);
+    const body: any = await res.json();
+    for (const c of body?.results ?? []) {
+      out.push(((c?.rich_text ?? []) as any[]).map((t) => t?.plain_text ?? '').join(''));
+    }
+    cursor = body?.has_more ? body?.next_cursor : undefined;
+  } while (cursor);
+  return out;
+}
+
+/** The remembered direct-KG contacts, from the newest comment carrying a marker. */
+function parseDirectMarker(comments: string[]): Set<string> {
+  for (let i = comments.length - 1; i >= 0; i--) {
+    const text = comments[i];
+    const start = text.indexOf(DIRECT_MARKER_PREFIX);
+    if (start < 0) continue;
+    const end = text.indexOf(DIRECT_MARKER_SUFFIX, start);
+    if (end < 0) continue;
+    const ids = text.slice(start + DIRECT_MARKER_PREFIX.length, end).split(',').map((s) => s.trim());
+    return new Set(ids.filter(Boolean));
+  }
+  return new Set<string>();
+}
+
+function buildDirectMarker(ids: Set<string>): string {
+  return DIRECT_MARKER_PREFIX + [...ids].sort().join(',') + DIRECT_MARKER_SUFFIX;
+}
+
 function ghlHeaders(): Record<string, string> {
   return {
     Authorization: `Bearer ${GHL_KEY}`,
@@ -295,14 +365,25 @@ async function followUpCounts(
 }
 
 /** Distinct contacts sitting in any of the given stages. */
-function distinctContacts(opps: Opp[], stageIds: string[]): number {
+function distinctContacts(opps: Opp[], stageIds: string[], exclude?: Set<string>): number {
   const wanted = new Set(stageIds);
   const contacts = new Set<string>();
   for (const o of opps) {
     if (!o.contactId || !o.pipelineStageId) continue;
+    if (exclude?.has(o.contactId)) continue;
     if (wanted.has(o.pipelineStageId)) contacts.add(o.contactId);
   }
   return contacts.size;
+}
+
+/** Contacts currently sitting in one of the given stages. */
+function contactsInStages(opps: Opp[], stageIds: string[]): Set<string> {
+  const wanted = new Set(stageIds);
+  const out = new Set<string>();
+  for (const o of opps) {
+    if (o.contactId && o.pipelineStageId && wanted.has(o.pipelineStageId)) out.add(o.contactId);
+  }
+  return out;
 }
 
 /** Read the current numeric values of the given Notion number properties (for the max-rule). */
@@ -381,10 +462,39 @@ async function main(): Promise<void> {
     .join(' ');
   console.log(`Stages (distinkte Kontakte): ${occupancy}`);
 
-  // 3. Metrics: everything from stages, except Follow-Up which comes from the calendars.
+  // 3. The direct-KG route: remember it, because the board forgets it (see the block above
+  //    DIRECT_MARKER_PREFIX for why nothing else works).
+  const comments = await notionGetComments(PAGE_ID);
+  const rememberedDirect = parseDirectMarker(comments);
+  const rememberedBefore = rememberedDirect.size;
+  const currentDirect = contactsInStages(opps, [S.kgDirekt]);
+  for (const cid of currentDirect) rememberedDirect.add(cid);
+
+  // A contact the board NOW places in a CC-only stage did have a CC after all (someone
+  // corrected the stage) — the current board wins over the remembered flag.
+  const CC_ONLY_STAGES = [S.ccGebucht, S.ccNoShow, S.kgAusCC, S.ccGefuehrt];
+  const provenCC = contactsInStages(opps, CC_ONLY_STAGES);
+  const excludeFromCC = new Set([...rememberedDirect].filter((cid) => !provenCC.has(cid)));
+  console.log(
+    `KG-direkt-Route: aktuell in der Stage=${currentDirect.size} · gemerkt (kumuliert)=${rememberedDirect.size} ` +
+    `(vorher ${rememberedBefore}) · aus den CC-Kennzahlen ausgeschlossen=${excludeFromCC.size} ` +
+    `(davon per Board-Korrektur zurueckgeholt=${rememberedDirect.size - excludeFromCC.size})`
+  );
+
+  // 4. Metrics: everything from stages, except Follow-Up which comes from the calendars.
+  //    Only the CC metrics get the exclusion — the SC ones must count the direct route.
+  const CC_METRICS = new Set(['ccGebucht', 'ccGefuehrt']);
   const computed: Record<string, number> = {};
   for (const [metric, stageIds] of Object.entries(METRICS)) {
-    computed[metric] = distinctContacts(opps, stageIds);
+    computed[metric] = CC_METRICS.has(metric)
+      ? distinctContacts(opps, stageIds, excludeFromCC)
+      : distinctContacts(opps, stageIds);
+  }
+  for (const metric of CC_METRICS) {
+    const ohne = distinctContacts(opps, METRICS[metric]);
+    if (ohne !== computed[metric]) {
+      console.log(`  ${metric}: ${ohne} ohne Bereinigung -> ${computed[metric]} nach Abzug der Direktbucher`);
+    }
   }
   const fu = await followUpCounts(allContacts);
   computed.fuGebucht = fu.gebucht;
@@ -421,17 +531,33 @@ async function main(): Promise<void> {
     `CC ${values['CC gebucht']}/${values['CC geführt']} · SC ${values['SC gebucht']}/${values['SC geführt']} · ` +
     `FU ${values['Follow-Up gebucht']}/${values['Follow-Up geführt']} (gebucht/geführt)`;
 
+  // The marker carries the accumulated direct-KG set forward. It is appended to the comment
+  // the job posts anyway; the next run reads the newest one back. Human-readable part first.
+  const marker = buildDirectMarker(rememberedDirect);
+  const commentWithMarker = `${commentText}
+${marker}`;
+  if (Buffer.byteLength(commentWithMarker, 'utf8') > NOTION_COMMENT_LIMIT - 128) {
+    // Never silently drop the memory: a truncated marker would look like "route forgotten"
+    // and the CC metrics would quietly start over-counting again.
+    console.warn(
+      `WARNUNG: Direkt-Marker mit ${rememberedDirect.size} IDs sprengt bald das Notion-Kommentarlimit ` +
+      `(${Buffer.byteLength(commentWithMarker, 'utf8')} von ${NOTION_COMMENT_LIMIT} Bytes). ` +
+      `Zustand braucht dann einen anderen Speicher (z.B. Railway-Volume oder GHL-Tag).`
+    );
+  }
+
   if (DRY_RUN) {
     console.log('DRY_RUN active -> nothing written to Notion.');
-    console.log('DRY_RUN would post comment:', commentText);
+    console.log('DRY_RUN would post comment:', commentWithMarker);
+    console.warn('DRY_RUN: Direkt-Marker wird NICHT geschrieben -> die gemerkte Route waechst nicht mit.');
     return;
   }
   await notionPatchNumbers(PAGE_ID, values);
   console.log(`[${new Date().toISOString()}] Notion page ${PAGE_ID} properties updated OK.`);
 
   try {
-    await notionAddComment(PAGE_ID, commentText);
-    console.log('Audit comment posted.');
+    await notionAddComment(PAGE_ID, commentWithMarker);
+    console.log(`Audit comment posted (mit Direkt-Marker, ${rememberedDirect.size} IDs).`);
   } catch (err) {
     console.warn('Comment post failed (KPI write still succeeded):', err instanceof Error ? err.message : err);
   }
