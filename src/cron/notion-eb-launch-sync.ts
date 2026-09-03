@@ -464,8 +464,23 @@ async function main(): Promise<void> {
 
   // 3. The direct-KG route: remember it, because the board forgets it (see the block above
   //    DIRECT_MARKER_PREFIX for why nothing else works).
-  const comments = await notionGetComments(PAGE_ID);
-  const rememberedDirect = parseDirectMarker(comments);
+  //    Reading the marker needs the integration's "read comments" capability. It writes
+  //    comments but may not be allowed to read them (verified 03.09.2026: HTTP 403). That
+  //    must NOT kill the whole sync, but it must not pass silently either: without the
+  //    memory only the contacts CURRENTLY in kgDirekt are excluded, so a direct booker who
+  //    has already advanced starts inflating CC again.
+  let rememberedDirect = new Set<string>();
+  let memoryReadable = true;
+  try {
+    rememberedDirect = parseDirectMarker(await notionGetComments(PAGE_ID));
+  } catch (err) {
+    memoryReadable = false;
+    console.warn(
+      'WARNUNG: Direkt-Marker nicht lesbar -> die gemerkte KG-direkt-Route faellt auf die ' +
+      'aktuelle Stage-Belegung zurueck. CC kann dadurch Direktbucher mitzaehlen, die schon ' +
+      'weitergezogen sind. Ursache: ' + (err instanceof Error ? err.message : String(err))
+    );
+  }
   const rememberedBefore = rememberedDirect.size;
   const currentDirect = contactsInStages(opps, [S.kgDirekt]);
   for (const cid of currentDirect) rememberedDirect.add(cid);
@@ -478,7 +493,8 @@ async function main(): Promise<void> {
   console.log(
     `KG-direkt-Route: aktuell in der Stage=${currentDirect.size} · gemerkt (kumuliert)=${rememberedDirect.size} ` +
     `(vorher ${rememberedBefore}) · aus den CC-Kennzahlen ausgeschlossen=${excludeFromCC.size} ` +
-    `(davon per Board-Korrektur zurueckgeholt=${rememberedDirect.size - excludeFromCC.size})`
+    `(davon per Board-Korrektur zurueckgeholt=${rememberedDirect.size - excludeFromCC.size})` +
+    (memoryReadable ? '' : ' [GEDAECHTNIS NICHT LESBAR - nur aktuelle Stage]')
   );
 
   // 4. Metrics: everything from stages, except Follow-Up which comes from the calendars.
