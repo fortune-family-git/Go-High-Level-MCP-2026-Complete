@@ -11,8 +11,9 @@
  *   Follow-Up gebucht / geführt                  -> CALENDARS, see FU_CALENDARS
  *
  * Follow-Up is the deliberate exception: the board hardly tracks it (stage "FU gebucht"
- * held 1 contact on 14.08.2026 while the follow-up calendars held 6, 3 of them already
- * done), and unlike the CC calls, follow-ups are not scattered across many calendars.
+ * held 1 contact on 14.08.2026). It is read from the two LAUNCH-SPECIFIC follow-up
+ * calendars only — never from the shared general ones, which carry other programmes'
+ * follow-ups for the same people (see FU_CALENDARS for what that cost).
  * Source per metric follows the data, not a preference for one system.
  *
  * WHY STAGES AND NOT CALENDARS (decided 14.08.2026, after the calendar version produced
@@ -136,29 +137,31 @@ const METRICS: Record<string, string[]> = {
 };
 
 /**
- * Follow-Up is the one metric that does NOT come from the board, because the board barely
- * tracks it: on 14.08.2026 the stage "FU gebucht" held 1 contact while the follow-up
- * calendars held 6 (3 of them already done). Nobody moves an opportunity into an FU stage
- * reliably, so a stage-based FU would report a fraction of reality.
+ * Follow-Up does NOT come from the board: the board barely tracks it (on 14.08.2026 the
+ * stage "FU gebucht" held 1 contact). But it must come from the LAUNCH-SPECIFIC calendars
+ * ONLY — the two below, nothing else.
  *
- * Follow-Ups also do not have the scattering problem that made calendars useless for CC:
- * they live in exactly these two calendar families, so the calendar IS the record here.
+ * WHY ONLY THESE (reported by the business side on 25.08.2026, verified 03.09.2026): the
+ * shared general "Follow Up Feven/Monika" calendars were in this list, and they carry
+ * follow-ups from OTHER programmes. Many EB leads are also customers elsewhere, so the
+ * pipeline-contact filter does not separate them: it counted 24 contacts as EB follow-ups,
+ * 17 of them as held, when this launch had had none at all. The names were checkable and
+ * all but two (Susanne Thiel, Larissa Lieder) had nothing to do with this launch.
  *
- * Both generations are listed. The "ExpertenBusiness Follow Up" calendars are dedicated to
- * this launch but were still EMPTY on 14.08.2026 — every actual follow-up sat in the older
- * shared pair. Removing those would report 0. (Rule from 11.08.2026: new calendars are
- * additional, never a replacement.)
+ * This is the exception to the "new calendars are additional, never a replacement" rule
+ * from 11.08.2026. That rule holds where the old calendar serves the SAME funnel and the
+ * booking flow simply has not moved yet (as with CC). It does NOT hold for a calendar that
+ * is shared across programmes — there, including it imports foreign bookings, and pipeline
+ * membership cannot filter them out. Ask which of the two cases applies before adding a
+ * calendar to any list here.
  */
 const FU_CALENDARS = [
-  'g3rHhuPkT1kgeWQZ1Uy1', // Follow Up Feven Winde                 (shared, currently the only one in use)
-  'gCobK98dVDnJI5g3mgHa', // Follow Up Monika Beye                 (shared)
-  'QrDTBB2EzMCREySHG5Pe', // ExpertenBusiness Follow Up Feven Winde (dedicated, empty on 14.08.2026)
-  'oGGABGXQ1hPKpcZHr5Iy', // ExpertenBusiness Follow Up Monika Beye (dedicated, empty on 14.08.2026)
+  'QrDTBB2EzMCREySHG5Pe', // ExpertenBusiness Follow Up Feven Winde
+  'oGGABGXQ1hPKpcZHr5Iy', // ExpertenBusiness Follow Up Monika Beye
 ];
-// The shared pair is also read by notion-webinar-sync.ts — which was stopped on 11.08.2026
-// (Money Alchemy closed), so nothing is counted on two Notion pages. If that job is ever
-// restarted, this overlap has to be resolved first.
-// "Roadmap Follow Up" belongs to a different funnel and stays out.
+// Deliberately OUT: 'g3rHhuPkT1kgeWQZ1Uy1' / 'gCobK98dVDnJI5g3mgHa' (general "Follow Up
+// Feven/Monika", shared across programmes — see above) and the "Roadmap Follow Up" pair
+// (different funnel). Do not re-add them to make the number look bigger.
 
 const GHL_CAL_VERSION = '2021-04-15'; // calendars API expects this version
 const EXCLUDE_CONTACT_IDS = new Set<string>(['oJHByWHQvm7kYeT3o7d9']); // account owner / test bookings
