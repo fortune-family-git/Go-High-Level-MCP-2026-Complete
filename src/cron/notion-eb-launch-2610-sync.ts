@@ -433,10 +433,16 @@ async function notionGetNumbers(pageId: string, names: string[]): Promise<Record
   return out;
 }
 
-/** Write number properties to the Notion page. */
+/**
+ * Write number properties to the Notion page, plus "Letzter Sync" (date) in the same request, so the
+ * timestamp only moves when the KPIs were written. The EB-Launch-Prognose dashboard reads it to warn
+ * when the numbers are stale (16.10.2026: a GHL 401 stopped the job and the dashboard silently
+ * compared two-day-old leads against the wrong August day).
+ */
 async function notionPatchNumbers(pageId: string, values: Record<string, number>): Promise<void> {
   const properties: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(values)) properties[key] = { number: value };
+  properties['Letzter Sync'] = { date: { start: new Date().toISOString() } };
   const res = await fetch(`https://api.notion.com/v1/pages/${pageId}`, {
     method: 'PATCH',
     headers: {
