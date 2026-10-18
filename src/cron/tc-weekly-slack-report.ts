@@ -85,7 +85,7 @@ function isoWeek(ts: number): number {
 
 // ---------- Format ----------
 const eur = (n: number) => Math.round(n).toLocaleString('de-DE') + ' €';
-const eurK = (n: number) => (Math.abs(n) >= 1000 ? (n / 1000).toLocaleString('de-DE', { maximumFractionDigits: 1, minimumFractionDigits: 1 }) + 'K €' : Math.round(n) + ' €');
+const eurK = (n: number) => (Math.abs(n) >= 1000 ? (n / 1000).toLocaleString('de-DE', { maximumFractionDigits: 1, minimumFractionDigits: 0 }) + 'K €' : Math.round(n) + ' €');
 const pct = (v: number) => Math.round(v * 100) + ' %';
 
 // ---------- Personen & Team ----------
