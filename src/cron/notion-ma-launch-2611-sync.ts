@@ -87,10 +87,9 @@ const S = {
  * In no list, as in the EB sync: `absage`, `noFit`, `kunden` (settable from anywhere), and the
  * MA-only `infopage`, `salespage`, `kaminabend`, `fuNachLaunch`, which prove no call.
  *
- * OPEN (02.11.2026): the purchase stages sit in the CC/SC lists as in EB. In MA a purchase
- * can also come straight from the sales page without any call; such a buyer would then be
- * counted as CC/SC held. Bounded by the number of sales (July: 19). Decide with the business
- * side before switching this job from DRY_RUN to live.
+ * DECIDED (business side, 02.11.2026): the purchase stages stay in the CC/SC lists as in EB.
+ * In MA a purchase can also come straight from the sales page without any call; such a buyer
+ * is then counted as CC/SC held. Accepted knowingly; bounded by the number of sales (July: 19).
  */
 const METRICS: Record<string, string[]> = {
   // Anmeldungen is computed by SUBTRACTING the landing-page stage (see the EB sync for why an
