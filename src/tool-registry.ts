@@ -51,6 +51,7 @@ import { TriggersTools } from './tools/triggers-tools.js';
 import { UsersTools } from './tools/users-tools.js';
 import { WebhooksTools } from './tools/webhooks-tools.js';
 import { WorkflowBuilderTools } from './tools/workflow-builder-tools.js';
+import { WorkflowInventoryTools } from './tools/workflow-inventory-tools.js';
 import { PhoneSystemTools } from './tools/phone-system-tools.js';
 import { VoiceAITools } from './tools/voice-ai-tools.js';
 import { ProposalsTools } from './tools/proposals-tools.js';
@@ -403,6 +404,10 @@ export class ToolRegistry {
     // Workflow Builder — internal API with Firebase auth (no GHL API client dependency)
     const workflowBuilderTools = new WorkflowBuilderTools();
     this.addModule('workflowBuilder', workflowBuilderTools, 'getTools', 'executeWorkflowBuilderTool');
+
+    // Workflow Inventory — read-only bulk export for documentation (Fortune Family)
+    const workflowInventoryTools = new WorkflowInventoryTools();
+    this.addModule('workflowInventory', workflowInventoryTools, 'getTools', 'executeInventoryTool');
   }
 
   private addModule(

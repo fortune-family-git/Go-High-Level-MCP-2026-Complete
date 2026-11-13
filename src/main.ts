@@ -5,6 +5,7 @@
  */
 
 import express from 'express';
+import { timingSafeEqual } from 'crypto';
 import cors from 'cors';
 import * as dotenv from 'dotenv';
 
@@ -84,6 +85,23 @@ async function main() {
     credentials: true,
   }));
   app.use(express.json());
+
+  // Access protection: set MCP_ACCESS_TOKEN in Railway. Accepted as
+  // ?key=<token> in the URL (works for claude.ai custom connectors),
+  // "Authorization: Bearer <token>" or "x-api-key: <token>". /health stays open.
+  const accessToken = process.env.MCP_ACCESS_TOKEN || '';
+  if (!accessToken) log('warn', 'MCP_ACCESS_TOKEN is not set: server is open to anyone with the URL');
+  app.use((req, res, next) => {
+    if (!accessToken || req.path === '/health') return next();
+    const auth = String(req.headers['authorization'] || '');
+    const supplied =
+      (typeof req.query.key === 'string' ? req.query.key : '') ||
+      (auth.startsWith('Bearer ') ? auth.slice(7) : '') ||
+      String(req.headers['x-api-key'] || '');
+    if (supplied && supplied.length === accessToken.length &&
+        timingSafeEqual(Buffer.from(supplied), Buffer.from(accessToken))) return next();
+    res.status(401).json({ error: 'Unauthorized' });
+  });
   app.use((req, _res, next) => {
     log('debug', `${req.method} ${req.path}`, { ip: req.ip });
     next();

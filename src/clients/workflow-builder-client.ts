@@ -312,6 +312,18 @@ export class WorkflowBuilderClient {
   }
 
   /**
+   * Get the triggers of a workflow. GHL stores triggers separately from
+   * workflowData, so getWorkflow() returns an empty trigger list.
+   */
+  async getWorkflowTriggers(workflowId: string): Promise<Record<string, unknown>[]> {
+    const { data } = await this.request<Record<string, unknown>[]>(
+      'GET',
+      `/${this.config.locationId}/trigger?workflowId=${encodeURIComponent(workflowId)}`
+    );
+    return Array.isArray(data) ? data : [];
+  }
+
+  /**
    * Get a workflow with full workflowData (actions, triggers, etc.)
    */
   async getWorkflow(workflowId: string): Promise<WorkflowFull> {
